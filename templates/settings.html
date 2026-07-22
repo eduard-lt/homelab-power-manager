@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings — Homelab Power Manager</title>
+    <style>
+        :root {
+            --bg: #121212;
+            --text: #fff;
+            --surface: #1e1e1e;
+            --border: #333;
+            --input-bg: #2a2a2a;
+            --green: #4CAF50;
+            --red: #f44336;
+            --blue: #2196F3;
+            --muted: #888;
+            --tab-bg: #2a2a2a;
+            --tab-active: #121212;
+        }
+        [data-theme="light"] {
+            --bg: #fff;
+            --text: #111;
+            --surface: #f5f5f5;
+            --border: #ddd;
+            --input-bg: #fff;
+            --muted: #666;
+            --tab-bg: #e8e8e8;
+            --tab-active: #fff;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+            max-width: 700px;
+            margin: 0 auto;
+            padding: 20px;
+            background: var(--bg);
+            color: var(--text);
+            transition: background 0.2s, color 0.2s;
+        }
+        h1 { font-size: 1.3rem; margin-bottom: 20px; }
+        h2 { font-size: 1.1rem; margin: 24px 0 12px; }
+        h3 { font-size: 1rem; margin: 0 0 8px; }
+
+        a.back { color: var(--blue); text-decoration: none; font-size: 0.9rem; }
+        a.back:hover { text-decoration: underline; }
+
+        /* Login overlay */
+        #loginOverlay {
+            position: fixed; inset: 0;
+            background: var(--bg);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+        #loginBox {
+            background: var(--surface);
+            padding: 32px;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            width: 320px;
+        }
+        #loginBox h2 { margin: 0 0 16px; }
+        #loginBox input {
+            width: 100%; padding: 10px;
+            background: var(--input-bg);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font-size: 1rem;
+            margin-bottom: 12px;
+        }
+        #loginBox button {
+            width: 100%; padding: 10px;
+            background: var(--blue);
+            color: #fff; border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        #loginErr { color: var(--red); font-size: 0.85rem; margin-top: 8px; }
+
+        /* Settings tabs (Form / YAML) */
+        .settings-tabs {
+            display: flex;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 20px;
+            gap: 2px;
+        }
+        .settings-tab {
+            padding: 8px 18px;
+            cursor: pointer;
+            background: var(--tab-bg);
+            border: 1px solid var(--border);
+            border-bottom: none;
+            border-radius: 8px 8px 0 0;
+            color: var(--text);
+            font-size: 0.9rem;
+            transition: background 0.2s;
+        }
+        .settings-tab.active, .settings-tab:hover {
+            background: var(--tab-active);
+            border-bottom: 1px solid var(--tab-active);
+            margin-bottom: -1px;
+        }
+        .settings-panel { display: none; }
+        .settings-panel.active { display: block; }
+
+        /* Forms */
+        label {
+            display: block;
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin: 10px 0 4px;
+            color: var(--muted);
+        }
+        input, select, textarea {
+            width: 100%;
+            padding: 8px 10px;
+            background: var(--input-bg);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+        input:focus, textarea:focus { outline: none; border-color: var(--blue); }
+
+        .field-hint {
+            font-size: 0.75rem;
+            color: var(--muted);
+            margin-top: 2px;
+        }
+
+        .section {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+        @media (max-width: 500px) {
+            .form-row { grid-template-columns: 1fr; }
+        }
+
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: #fff;
+        }
+        button:active { transform: scale(0.97); }
+
+        .btn-save { background: var(--green); margin-top: 12px; }
+        .btn-danger { background: var(--red); }
+        .btn-secondary { background: #555; color: #fff; }
+        .btn-add { background: var(--blue); margin-top: 12px; }
+
+        .msg { padding: 8px 12px; border-radius: 6px; margin-top: 8px; font-size: 0.9rem; }
+        .msg.ok { background: rgba(76,175,80,0.15); color: var(--green); }
+        .msg.err { background: rgba(244,67,54,0.15); color: var(--red); }
+
+        .device-card {
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 14px;
+            margin-bottom: 12px;
+            background: var(--bg);
+        }
+        .device-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .device-card-header h3 { margin: 0; }
+
+        hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+
+        /* YAML editor */
+        #yamlEditor {
+            width: 100%;
+            min-height: 400px;
+            font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+            font-size: 0.8rem;
+            line-height: 1.5;
+            tab-size: 2;
+            resize: vertical;
+        }
+        .yaml-hint {
+            font-size: 0.8rem;
+            color: var(--muted);
+            margin-bottom: 12px;
+            line-height: 1.5;
+        }
+        .yaml-hint code {
+            background: var(--surface);
+            padding: 2px 5px;
+            border-radius: 3px;
+            font-size: 0.78rem;
+        }
+    </style>
+</head>
+<body>
+    <a href="/" class="back">&larr; Back to dashboard</a>
+    <h1>Settings</h1>
+
+    <!-- Login overlay -->
+    <div id="loginOverlay">
+        <div id="loginBox">
+            <h2>Enter Password</h2>
+            <input type="password" id="loginPassword" placeholder="Password" autofocus>
+            <button id="loginBtn">Unlock</button>
+            <div id="loginErr"></div>
+        </div>
+    </div>
+
+    <!-- Main settings (hidden until authenticated) -->
+    <div id="settingsContent" style="display:none">
+        <div id="msgArea"></div>
+
+        <!-- Settings tabs: Form | YAML -->
+        <div class="settings-tabs">
+            <div class="settings-tab active" data-panel="formPanel" onclick="switchPanel('formPanel')">&#128221; Form</div>
+            <div class="settings-tab" data-panel="yamlPanel" onclick="switchPanel('yamlPanel')">&#128220; YAML</div>
+        </div>
+
+        <!-- ========== FORM PANEL ========== -->
+        <div id="formPanel" class="settings-panel active">
+            <h2>Devices</h2>
+            <div id="devicesContainer"></div>
+            <button class="btn-add" id="addDeviceBtn">+ Add Device</button>
+
+            <h2>Global Settings</h2>
+            <div class="section">
+                <h3>Restricted Hours</h3>
+                <p class="field-hint">Prevent wake-ups during this time window.</p>
+                <div class="form-row">
+                    <div>
+                        <label>Start hour (0-23)</label>
+                        <input type="number" id="restrictedStart" min="0" max="23">
+                    </div>
+                    <div>
+                        <label>End hour (0-23)</label>
+                        <input type="number" id="restrictedEnd" min="0" max="23">
+                    </div>
+                </div>
+            </div>
+
+            <div class="section">
+                <h3>Change Settings Password</h3>
+                <label>New password</label>
+                <input type="password" id="newPassword" placeholder="Leave blank to keep current">
+            </div>
+
+            <button class="btn-save" id="saveAllBtn">Save All Settings</button>
+        </div>
+
+        <!-- ========== YAML PANEL ========== -->
+        <div id="yamlPanel" class="settings-panel">
+            <h2>Raw YAML Configuration</h2>
+            <p class="yaml-hint">
+                Edit the configuration directly as YAML. You can also edit
+                <code>config.yaml</code> with any text editor on the Pi and the
+                app will pick up changes on restart.
+            </p>
+            <textarea id="yamlEditor" spellcheck="false"></textarea>
+            <button class="btn-save" id="saveYamlBtn">Save YAML</button>
+        </div>
+    </div>
+
+    <script>
+        const THEME_KEY = 'homelab_pm_theme';
+        function getTheme() { return localStorage.getItem(THEME_KEY) || 'dark'; }
+        document.documentElement.setAttribute('data-theme', getTheme());
+
+        let authToken = null;
+        let devices = [];
+        let restrictedHours = { start: 2, end: 7 };
+
+        // Helper: build headers with auth
+        function authHeaders() {
+            return {
+                'Content-Type': 'application/json',
+                'X-Settings-Password': authToken || '',
+            };
+        }
+
+        // ===== Panel switching =====
+        function switchPanel(name) {
+            document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.settings-panel').forEach(p => p.classList.remove('active'));
+            document.querySelector(`[data-panel="${name}"]`).classList.add('active');
+            document.getElementById(name).classList.add('active');
+
+            if (name === 'yamlPanel') loadYaml();
+        }
+
+        // ===== Login =====
+        document.getElementById('loginBtn').addEventListener('click', async () => {
+            const pwd = document.getElementById('loginPassword').value;
+            try {
+                const resp = await fetch('/api/settings/auth', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Settings-Password': pwd,
+                    },
+                    body: JSON.stringify({ password: pwd }),
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    authToken = pwd;
+                    document.getElementById('loginOverlay').style.display = 'none';
+                    document.getElementById('settingsContent').style.display = 'block';
+                    await loadSettings();
+                } else {
+                    document.getElementById('loginErr').textContent = data.message || 'Invalid password';
+                }
+            } catch (e) {
+                document.getElementById('loginErr').textContent = 'Connection error';
+            }
+        });
+
+        document.getElementById('loginPassword').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') document.getElementById('loginBtn').click();
+        });
+
+        // ===== Load settings (form) =====
+        async function loadSettings() {
+            try {
+                const resp = await fetch('/api/settings', {
+                    method: 'GET',
+                    headers: authHeaders(),
+                });
+                const data = await resp.json();
+                devices = data.devices || [];
+                restrictedHours = data.restricted_hours || { start: 2, end: 7 };
+
+                document.getElementById('restrictedStart').value = restrictedHours.start;
+                document.getElementById('restrictedEnd').value = restrictedHours.end;
+
+                renderDevices();
+            } catch (e) {
+                showMsg('Failed to load settings.', 'err');
+            }
+        }
+
+        // ===== Render device cards =====
+        function renderDevices() {
+            const container = document.getElementById('devicesContainer');
+            container.innerHTML = devices.map((d, idx) => `
+                <div class="device-card" data-idx="${idx}">
+                    <div class="device-card-header">
+                        <h3>${escapeHtml(d.name) || 'Unnamed Device'}</h3>
+                        <button class="btn-danger" onclick="deleteDevice(${idx})" style="padding:6px 12px;font-size:0.8rem">Delete</button>
+                    </div>
+
+                    <div class="form-row">
+                        <div>
+                            <label>Device Name *</label>
+                            <input type="text" class="dev-name" value="${escapeHtml(d.name)}" placeholder="e.g. Server, PC">
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div>
+                            <label>IP Address *</label>
+                            <input type="text" class="dev-ip" value="${escapeHtml(d.ip)}" placeholder="192.168.1.100">
+                        </div>
+                        <div>
+                            <label>MAC Address *</label>
+                            <input type="text" class="dev-mac" value="${escapeHtml(d.mac)}" placeholder="AA:BB:CC:DD:EE:FF">
+                        </div>
+                    </div>
+
+                    <hr>
+                    <p class="field-hint" style="margin-bottom:8px">SSH Configuration (optional — leave key path empty to disable shutdown)</p>
+                    <div class="form-row">
+                        <div>
+                            <label>SSH Key Path</label>
+                            <input type="text" class="dev-ssh-key" value="${escapeHtml(d.ssh_key_path)}" placeholder="/home/pi/.ssh/id_ed25519">
+                        </div>
+                        <div>
+                            <label>SSH Port</label>
+                            <input type="number" class="dev-ssh-port" value="${d.ssh_port || 22}" min="1" max="65535">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div>
+                            <label>SSH Username</label>
+                            <input type="text" class="dev-ssh-user" value="${escapeHtml(d.ssh_username)}" placeholder="pi">
+                        </div>
+                        <div>
+                            <label>SSH Key Passphrase</label>
+                            <input type="password" class="dev-ssh-pass" value="${escapeHtml(d.ssh_key_passphrase)}" placeholder="(optional)">
+                        </div>
+                    </div>
+                    <div>
+                        <label>Shutdown Command</label>
+                        <input type="text" class="dev-shutdown-cmd" value="${escapeHtml(d.shutdown_command || 'suspend-now')}" placeholder="suspend-now">
+                        <p class="field-hint">Default: suspend-now. Make sure this command works without sudo on the target device.</p>
+                    </div>
+
+                    <hr>
+                    <p class="field-hint" style="margin-bottom:8px">Tautulli/Plex Configuration (optional — leave blank to disable stream monitoring)</p>
+                    <div class="form-row">
+                        <div>
+                            <label>Tautulli IP</label>
+                            <input type="text" class="dev-tautulli-ip" value="${escapeHtml(d.tautulli_ip)}" placeholder="192.168.1.100">
+                        </div>
+                        <div>
+                            <label>Tautulli Port</label>
+                            <input type="number" class="dev-tautulli-port" value="${d.tautulli_port || 7979}" min="1" max="65535">
+                        </div>
+                    </div>
+                    <div>
+                        <label>Tautulli API Key</label>
+                        <input type="text" class="dev-tautulli-key" value="${escapeHtml(d.tautulli_apikey)}" placeholder="Your Tautulli API key">
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        // ===== Add/Delete devices =====
+        document.getElementById('addDeviceBtn').addEventListener('click', () => {
+            devices.push({
+                name: '',
+                ip: '',
+                mac: '',
+                ssh_key_path: '',
+                ssh_port: 22,
+                ssh_username: '',
+                ssh_key_passphrase: '',
+                shutdown_command: 'suspend-now',
+                tautulli_ip: '',
+                tautulli_port: 7979,
+                tautulli_apikey: '',
+            });
+            renderDevices();
+        });
+
+        function deleteDevice(idx) {
+            if (confirm('Delete this device?')) {
+                devices.splice(idx, 1);
+                renderDevices();
+            }
+        }
+
+        // ===== Save form settings =====
+        function collectDevices() {
+            const cards = document.querySelectorAll('.device-card');
+            return Array.from(cards).map(card => ({
+                name: card.querySelector('.dev-name')?.value || '',
+                ip: card.querySelector('.dev-ip')?.value || '',
+                mac: card.querySelector('.dev-mac')?.value || '',
+                ssh_key_path: card.querySelector('.dev-ssh-key')?.value || '',
+                ssh_port: parseInt(card.querySelector('.dev-ssh-port')?.value) || 22,
+                ssh_username: card.querySelector('.dev-ssh-user')?.value || '',
+                ssh_key_passphrase: card.querySelector('.dev-ssh-pass')?.value || '',
+                shutdown_command: card.querySelector('.dev-shutdown-cmd')?.value || 'suspend-now',
+                tautulli_ip: card.querySelector('.dev-tautulli-ip')?.value || '',
+                tautulli_port: parseInt(card.querySelector('.dev-tautulli-port')?.value) || 7979,
+                tautulli_apikey: card.querySelector('.dev-tautulli-key')?.value || '',
+            }));
+        }
+
+        document.getElementById('saveAllBtn').addEventListener('click', async () => {
+            const newPassword = document.getElementById('newPassword').value;
+
+            const payload = {
+                restricted_hours: {
+                    start: parseInt(document.getElementById('restrictedStart').value) || 2,
+                    end: parseInt(document.getElementById('restrictedEnd').value) || 7,
+                },
+                devices: collectDevices(),
+            };
+
+            if (newPassword) {
+                payload.settings_password = newPassword;
+            }
+
+            try {
+                const resp = await fetch('/api/settings', {
+                    method: 'POST',
+                    headers: authHeaders(),
+                    body: JSON.stringify(payload),
+                });
+                const data = await resp.json();
+
+                if (data.success) {
+                    if (newPassword) authToken = newPassword;
+                    showMsg('Settings saved successfully!', 'ok');
+                    await loadSettings();
+                } else {
+                    showMsg(data.message || 'Failed to save settings.', 'err');
+                }
+            } catch (e) {
+                showMsg('Connection error while saving.', 'err');
+            }
+        });
+
+        // ===== YAML editor =====
+        async function loadYaml() {
+            try {
+                const resp = await fetch('/api/settings/yaml', {
+                    method: 'GET',
+                    headers: authHeaders(),
+                });
+                const data = await resp.json();
+                document.getElementById('yamlEditor').value = data.yaml || '';
+            } catch (e) {
+                showMsg('Failed to load YAML config.', 'err');
+            }
+        }
+
+        document.getElementById('saveYamlBtn').addEventListener('click', async () => {
+            const yamlText = document.getElementById('yamlEditor').value;
+
+            try {
+                const resp = await fetch('/api/settings/yaml', {
+                    method: 'POST',
+                    headers: authHeaders(),
+                    body: JSON.stringify({ yaml: yamlText }),
+                });
+                const data = await resp.json();
+
+                if (data.success) {
+                    showMsg('YAML saved successfully!', 'ok');
+                    await loadSettings();
+                } else {
+                    showMsg(data.message || 'Invalid YAML.', 'err');
+                }
+            } catch (e) {
+                showMsg('Connection error while saving.', 'err');
+            }
+        });
+
+        function showMsg(text, type) {
+            const area = document.getElementById('msgArea');
+            area.innerHTML = `<div class="msg ${type}">${text}</div>`;
+            setTimeout(() => { area.innerHTML = ''; }, 4000);
+        }
+    </script>
+</body>
+</html>

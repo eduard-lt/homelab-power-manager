@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<link rel="apple-touch-icon" href="/static/power-on-512.png">
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Homelab Power Manager</title>
+    <link rel="manifest" href="/manifest.json">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <meta name="apple-mobile-web-app-title" content="Power Mgr">
+
+    <style>
+        :root {
+            --bg: #121212;
+            --text: #fff;
+            --surface: #1e1e1e;
+            --border: #333;
+            --tab-bg: #2a2a2a;
+            --tab-active: #121212;
+            --log-bg: #1a1a1a;
+            --stream-bg: #252525;
+            --muted: #888;
+            --green: #4CAF50;
+            --red: #f44336;
+            --blue: #2196F3;
+            --orange: #ff9800;
+        }
+
+        [data-theme="light"] {
+            --bg: #fff;
+            --text: #111;
+            --surface: #f5f5f5;
+            --border: #ddd;
+            --tab-bg: #e8e8e8;
+            --tab-active: #fff;
+            --log-bg: #fafafa;
+            --stream-bg: #f0f0f0;
+            --muted: #666;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 16px;
+            background: var(--bg);
+            color: var(--text);
+            transition: background 0.2s, color 0.2s;
+        }
+
+        h1 {
+            font-size: 1.3rem;
+            margin-bottom: 16px;
+        }
+
+        /* Theme toggle */
+        #theme-toggle {
+            position: fixed;
+            top: 16px;
+            right: 16px;
+            padding: 8px;
+            background: transparent;
+            color: var(--text);
+            border: none;
+            cursor: pointer;
+            z-index: 100;
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            font-size: 1.3rem;
+            transition: background 0.2s;
+        }
+        #theme-toggle:hover { background: var(--surface); }
+
+        /* Tabs */
+        .tabs {
+            display: flex;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 16px;
+            gap: 2px;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+        .tab {
+            padding: 10px 18px;
+            cursor: pointer;
+            background: var(--tab-bg);
+            border: 1px solid var(--border);
+            border-bottom: none;
+            border-radius: 8px 8px 0 0;
+            color: var(--text);
+            font-size: 0.9rem;
+            white-space: nowrap;
+            transition: background 0.2s;
+            flex-shrink: 0;
+        }
+        .tab.active, .tab:hover {
+            background: var(--tab-active);
+            border-bottom: 1px solid var(--tab-active);
+            margin-bottom: -1px;
+        }
+        .tab.settings-tab { margin-left: auto; font-weight: bold; }
+
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        /* Status */
+        .status {
+            margin: 12px 0;
+            padding: 12px 16px;
+            background: var(--surface);
+            border-radius: 8px;
+            font-size: 0.95rem;
+            line-height: 1.5;
+        }
+
+        /* Controls */
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin: 12px 0;
+        }
+        button {
+            padding: 10px 18px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: #fff;
+            transition: opacity 0.2s, transform 0.1s;
+        }
+        button:active { transform: scale(0.97); }
+        button:disabled { opacity: 0.4; cursor: not-allowed; }
+        button.on { background: var(--green); }
+        button.off { background: var(--red); }
+        button.schedule { background: var(--orange); }
+        button.refresh { background: var(--blue); }
+
+        select {
+            padding: 10px 12px;
+            font-size: 0.9rem;
+            background: var(--surface);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+        }
+
+        .msg { margin-top: 8px; font-style: italic; color: var(--muted); }
+        .err { margin-top: 8px; color: var(--red); padding: 8px; border-radius: 6px; background: rgba(244,67,54,0.1); }
+
+        /* Plex streams */
+        .plex-section { margin-top: 20px; }
+        .plex-section h3 {
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--muted);
+            margin-bottom: 8px;
+        }
+        .plex-stream-card {
+            background: var(--stream-bg);
+            border-radius: 8px;
+            padding: 10px 14px;
+            margin-bottom: 6px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 0.9rem;
+        }
+        .plex-stream-icon { font-size: 1.2rem; flex-shrink: 0; }
+        .plex-stream-info { flex: 1; min-width: 0; }
+        .plex-stream-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .plex-stream-meta { font-size: 0.8rem; color: var(--muted); margin-top: 2px; }
+
+        /* Logs */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 12px;
+            font-size: 0.85rem;
+        }
+        th, td {
+            padding: 8px 10px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+        th { background: var(--surface); font-weight: 600; }
+        .log-container {
+            max-height: 350px;
+            overflow-y: auto;
+            border: 1px solid var(--border);
+            padding: 12px;
+            background: var(--log-bg);
+            font-family: monospace;
+            font-size: 0.8rem;
+            margin-top: 12px;
+            border-radius: 8px;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        /* Mobile */
+        @media (max-width: 600px) {
+            body { padding: 10px; }
+            .controls { flex-direction: column; }
+            .controls button, .controls select { width: 100%; }
+            .tab { padding: 8px 14px; font-size: 0.85rem; }
+        }
+    </style>
+</head>
+<body>
+    <button id="theme-toggle" aria-label="Toggle theme">🌙</button>
+    <h1>Homelab Power Manager</h1>
+
+    <div class="tabs" id="tabBar">
+        <!-- Populated dynamically -->
+    </div>
+
+    <div id="tabContents">
+        <!-- Device tabs and content populated dynamically -->
+    </div>
+
+    <script>
+        // ==================================================================
+        // Theme
+        // ==================================================================
+        const THEME_KEY = 'homelab_pm_theme';
+        function getTheme() { return localStorage.getItem(THEME_KEY) || 'dark'; }
+        function setTheme(t) {
+            localStorage.setItem(THEME_KEY, t);
+            document.documentElement.setAttribute('data-theme', t);
+            document.getElementById('theme-toggle').textContent = t === 'dark' ? '🌙' : '☀️';
+        }
+        document.getElementById('theme-toggle').addEventListener('click', () => {
+            setTheme(getTheme() === 'dark' ? 'light' : 'dark');
+        });
+        setTheme(getTheme());
+
+        // ==================================================================
+        // State
+        // ==================================================================
+        let devices = [];
+
+        async function fetchDevices() {
+            try {
+                const resp = await fetch('/api/devices');
+                devices = await resp.json();
+                buildTabs();
+                updateAllStatuses();
+            } catch (e) {
+                console.error('Failed to fetch devices:', e);
+            }
+        }
+
+        // ==================================================================
+        // Build dynamic tabs
+        // ==================================================================
+        function buildTabs() {
+            const tabBar = document.getElementById('tabBar');
+            const tabContents = document.getElementById('tabContents');
+
+            // Keep existing active tab if possible
+            const activeTab = tabBar.querySelector('.tab.active');
+            const activeName = activeTab ? activeTab.dataset.tab : null;
+
+            tabBar.innerHTML = '';
+            tabContents.innerHTML = '';
+
+            // Device tabs
+            devices.forEach((dev, idx) => {
+                const isActive = (activeName === dev.name) || (!activeName && idx === 0);
+
+                // Tab header
+                const tab = document.createElement('div');
+                tab.className = 'tab' + (isActive ? ' active' : '');
+                tab.dataset.tab = dev.name;
+                tab.textContent = dev.name;
+                tab.addEventListener('click', () => showTab(dev.name));
+                tabBar.appendChild(tab);
+
+                // Tab content
+                const content = document.createElement('div');
+                content.id = `tab-${sanitizeId(dev.name)}`;
+                content.className = 'tab-content' + (isActive ? ' active' : '');
+                content.innerHTML = `
+                    <div class="status" id="status-${sanitizeId(dev.name)}">Checking...</div>
+                    <div class="controls" id="controls-${sanitizeId(dev.name)}"></div>
+                    <div class="msg" id="msg-${sanitizeId(dev.name)}"></div>
+                    <div class="err" id="err-${sanitizeId(dev.name)}"></div>
+                    <div class="plex-section" id="plex-${sanitizeId(dev.name)}" style="display:none">
+                        <h3>&#9654; Plex &mdash; Active Streams</h3>
+                        <div id="plexStreams-${sanitizeId(dev.name)}"></div>
+                    </div>
+                `;
+                tabContents.appendChild(content);
+
+                // Build controls
+                buildControls(dev);
+            });
+
+            // Logs tab
+            {
+                const tab = document.createElement('div');
+                tab.className = 'tab' + (activeName === '__logs__' ? ' active' : '');
+                tab.dataset.tab = '__logs__';
+                tab.textContent = 'Logs';
+                tab.addEventListener('click', () => showTab('__logs__'));
+                tabBar.appendChild(tab);
+
+                const content = document.createElement('div');
+                content.id = 'tab-__logs__';
+                content.className = 'tab-content' + (activeName === '__logs__' ? ' active' : '');
+                content.innerHTML = `
+                    <h2>Activity Logs</h2>
+                    <button class="refresh" onclick="loadActivityLogs()">Refresh</button>
+                    <table id="activity-logs"><thead><tr><th>Timestamp</th><th>Action</th><th>Result</th><th>Details</th></tr></thead><tbody></tbody></table>
+                    <h2 style="margin-top:20px">System Logs</h2>
+                    <button class="refresh" onclick="loadSystemLogs()">Refresh</button>
+                    <div class="log-container" id="system-logs">Loading...</div>
+                `;
+                tabContents.appendChild(content);
+            }
+
+            // Settings tab
+            {
+                const tab = document.createElement('div');
+                tab.className = 'tab settings-tab' + (activeName === '__settings__' ? ' active' : '');
+                tab.dataset.tab = '__settings__';
+                tab.textContent = '⚙ Settings';
+                tab.addEventListener('click', () => showTab('__settings__'));
+                tabBar.appendChild(tab);
+
+                const content = document.createElement('div');
+                content.id = 'tab-__settings__';
+                content.className = 'tab-content' + (activeName === '__settings__' ? ' active' : '');
+                content.innerHTML = '<p style="margin-top:16px">Redirecting to settings page...</p>';
+                tabContents.appendChild(content);
+            }
+        }
+
+        function sanitizeId(name) {
+            return name.replace(/[^a-zA-Z0-9_-]/g, '_');
+        }
+
+        function showTab(name) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+
+            const tab = document.querySelector(`.tab[data-tab="${CSS.escape(name)}"]`);
+            const content = document.getElementById(`tab-${sanitizeId(name)}`);
+            if (tab) tab.classList.add('active');
+            if (content) content.classList.add('active');
+
+            if (name === '__logs__') {
+                loadActivityLogs();
+                loadSystemLogs();
+            }
+            if (name === '__settings__') {
+                window.location.href = '/settings';
+            }
+        }
+
+        // ==================================================================
+        // Build controls per device
+        // ==================================================================
+        function buildControls(dev) {
+            const ctrl = document.getElementById(`controls-${sanitizeId(dev.name)}`);
+            let html = `<button class="on" id="btnOn-${sanitizeId(dev.name)}">Turn On (WoL)</button>`;
+
+            if (dev.has_ssh) {
+                html += `<button class="off" id="btnOff-${sanitizeId(dev.name)}">Turn Off (SSH)</button>`;
+                html += `<select id="hours-${sanitizeId(dev.name)}" aria-label="Shutdown delay">
+                    <option value="1">1h</option><option value="2">2h</option>
+                    <option value="3">3h</option><option value="4">4h</option>
+                    <option value="8">8h</option><option value="12">12h</option>
+                </select>`;
+                html += `<button class="schedule" id="btnSched-${sanitizeId(dev.name)}">Turn Off After</button>`;
+            }
+
+            ctrl.innerHTML = html;
+
+            // Wire up events
+            document.getElementById(`btnOn-${sanitizeId(dev.name)}`).addEventListener('click', () => {
+                controlDevice(dev.name, 'turn_on');
+            });
+
+            if (dev.has_ssh) {
+                document.getElementById(`btnOff-${sanitizeId(dev.name)}`).addEventListener('click', () => {
+                    controlDevice(dev.name, 'turn_off');
+                });
+                document.getElementById(`btnSched-${sanitizeId(dev.name)}`).addEventListener('click', () => {
+                    const hours = document.getElementById(`hours-${sanitizeId(dev.name)}`).value;
+                    controlDevice(dev.name, 'schedule_off', { hours: hours });
+                });
+            }
+        }
+
+        // ==================================================================
+        // Status polling
+        // ==================================================================
+        async function updateAllStatuses() {
+            try {
+                const resp = await fetch('/api/status');
+                const data = await resp.json();
+
+                for (const ds of data.devices) {
+                    updateDeviceStatus(ds);
+                }
+
+                // Update restricted hours state
+                const restricted = data.restricted_hours;
+                for (const dev of devices) {
+                    const btnOn = document.getElementById(`btnOn-${sanitizeId(dev.name)}`);
+                    if (btnOn) {
+                        const ds = data.devices.find(d => d.name === dev.name);
+                        btnOn.disabled = (ds && ds.online) || restricted;
+                    }
+                }
+            } catch (e) {
+                console.error('Status fetch error:', e);
+            }
+        }
+
+        function updateDeviceStatus(ds) {
+            const statusEl = document.getElementById(`status-${sanitizeId(ds.name)}`);
+            if (!statusEl) return;
+
+            let text = `Status: <strong>${ds.online ? 'ONLINE' : 'OFFLINE'}</strong>`;
+            statusEl.innerHTML = text;
+
+            // Buttons
+            const btnOn = document.getElementById(`btnOn-${sanitizeId(ds.name)}`);
+            if (btnOn) btnOn.disabled = ds.online;
+
+            if (ds.has_ssh) {
+                const btnOff = document.getElementById(`btnOff-${sanitizeId(ds.name)}`);
+                const btnSched = document.getElementById(`btnSched-${sanitizeId(ds.name)}`);
+                if (btnOff) btnOff.disabled = !ds.online;
+                if (btnSched) btnSched.disabled = !ds.online;
+            }
+
+            // Plex streams
+            if (ds.has_tautulli && ds.streams && ds.streams.length > 0) {
+                const section = document.getElementById(`plex-${sanitizeId(ds.name)}`);
+                const container = document.getElementById(`plexStreams-${sanitizeId(ds.name)}`);
+                if (section) section.style.display = 'block';
+                if (container) {
+                    container.innerHTML = ds.streams.map(s => {
+                        const icon = s.type === 'movie' ? '🎬' : (s.type === 'episode' ? '📺' : '🎵');
+                        const meta = [s.user, s.quality].filter(Boolean).join(' · ');
+                        return `<div class="plex-stream-card">
+                            <span class="plex-stream-icon">${icon}</span>
+                            <div class="plex-stream-info">
+                                <div class="plex-stream-title">${escapeHtml(s.title)}</div>
+                                ${meta ? '<div class="plex-stream-meta">' + escapeHtml(meta) + '</div>' : ''}
+                            </div>
+                        </div>`;
+                    }).join('');
+                }
+            } else {
+                const section = document.getElementById(`plex-${sanitizeId(ds.name)}`);
+                if (section) section.style.display = 'none';
+            }
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        // ==================================================================
+        // Control actions
+        // ==================================================================
+        async function controlDevice(name, action, extra = {}) {
+            const sid = sanitizeId(name);
+            const msgEl = document.getElementById(`msg-${sid}`);
+            const errEl = document.getElementById(`err-${sid}`);
+
+            const messages = {
+                turn_on: 'Sending Wake-on-LAN...',
+                turn_off: 'Sending shutdown via SSH...',
+                schedule_off: 'Scheduling shutdown...'
+            };
+            if (msgEl) msgEl.textContent = messages[action] || '';
+
+            try {
+                const resp = await fetch('/api/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action, device: name, ...extra }),
+                });
+                const data = await resp.json();
+
+                if (data.success) {
+                    if (errEl) errEl.textContent = '';
+                    if (msgEl) {
+                        const okMessages = {
+                            turn_on: 'Wake-on-LAN sent! Waiting for device...',
+                            turn_off: 'Shutdown command sent!',
+                            schedule_off: `Scheduled shutdown at ${data.scheduled_time || ''}`
+                        };
+                        msgEl.textContent = okMessages[action] || 'Done!';
+                        setTimeout(() => { if (msgEl) msgEl.textContent = ''; }, 4000);
+                    }
+                } else {
+                    if (msgEl) msgEl.textContent = '';
+                    if (errEl) errEl.textContent = data.message || 'Action failed.';
+                }
+
+                await updateAllStatuses();
+            } catch (e) {
+                console.error('Control error:', e);
+                if (msgEl) msgEl.textContent = '';
+                if (errEl) errEl.textContent = 'Error communicating with server.';
+            }
+        }
+
+        // ==================================================================
+        // Logs
+        // ==================================================================
+        async function loadActivityLogs() {
+            try {
+                const resp = await fetch('/api/logs?type=activity&limit=50');
+                const data = await resp.json();
+                const tbody = document.querySelector('#activity-logs tbody');
+                if (!tbody) return;
+                tbody.innerHTML = '';
+                if (Array.isArray(data)) {
+                    data.reverse().forEach(log => {
+                        tbody.innerHTML += `<tr><td>${log.timestamp}</td><td>${log.action}</td><td>${log.result}</td><td>${log.details||''}</td></tr>`;
+                    });
+                }
+            } catch (e) { console.error('Activity logs error:', e); }
+        }
+
+        async function loadSystemLogs() {
+            try {
+                const resp = await fetch('/api/logs?type=system&limit=100');
+                const data = await resp.json();
+                const container = document.getElementById('system-logs');
+                if (!container) return;
+                if (Array.isArray(data)) {
+                    container.textContent = data.join('');
+                    container.scrollTop = container.scrollHeight;
+                } else {
+                    container.textContent = 'No logs available.';
+                }
+            } catch (e) { console.error('System logs error:', e); }
+        }
+
+        // ==================================================================
+        // Init
+        // ==================================================================
+        fetchDevices();
+        setInterval(updateAllStatuses, 5000);
+        setInterval(() => {
+            const activeTab = document.querySelector('.tab.active');
+            if (activeTab && activeTab.dataset.tab === '__logs__') {
+                loadActivityLogs();
+                loadSystemLogs();
+            }
+        }, 10000);
+    </script>
+</body>
+</html>
