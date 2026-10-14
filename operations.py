@@ -184,12 +184,22 @@ class Operations:
         if rc == -1:
             # Some suspend commands never answer; the ping check below decides.
             self._step(op, "warn", "No reply from the shutdown command (normal for suspend)")
-        elif status_cmd:
-            self._pull_progress(device, op, status_cmd, seen)
         else:
-            for line in out.splitlines():
-                if line.strip():
-                    self._step(op, "info", line.strip())
+            state = None
+            if status_cmd:
+                state, _ = self._pull_progress(device, op, status_cmd, seen)
+            if state is None:
+                # No usable progress (none configured, or e.g. an older goodnight
+                # without --progress): show what the command printed instead.
+                for line in out.splitlines():
+                    line = line.strip()
+                    if line.startswith("goodnight: "):
+                        line = line[len("goodnight: "):]
+                    if line:
+                        self._step(op, "info", line)
+                if status_cmd:
+                    self._step(op, "warn", "Progress command failed - live steps unavailable")
+                    status_cmd = ""
 
         if rc == BLOCKED_EXIT_CODE:
             with self._lock:
@@ -200,7 +210,7 @@ class Operations:
             detail = detail[-1] if detail else "no output"
             return self._finish(device, op, "failed", f"Shutdown command failed (exit {rc}): {detail}")
 
-        if rc == 0 and not status_cmd:
+        if rc == 0 and not seen:
             self._step(op, "ok", "Shutdown command accepted")
 
         # Follow the server's own progress until it stops answering

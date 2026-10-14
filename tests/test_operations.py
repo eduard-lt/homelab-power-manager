@@ -121,3 +121,20 @@ def test_wake_times_out(ops, monkeypatch):
     op = wait(ops)
     assert op["state"] == "failed"
     assert any("sent the magic packet again" in s["msg"] for s in op["steps"])
+
+
+def test_shutdown_falls_back_to_output_when_progress_fails(ops, monkeypatch):
+    """An older goodnight without --progress: show its stdout, don't hide everything."""
+    def fake_ssh(device, command, timeout=10):
+        if command == "goodnight":
+            return 0, "goodnight: started in the background\n", ""
+        return 2, "", "usage: goodnight [--foreground|--dry-run|--status]"
+
+    monkeypatch.setattr(operations.devices, "run_ssh", fake_ssh)
+    monkeypatch.setattr(operations.devices, "ping", lambda ip, timeout=1.0: False)
+    ops.start_shutdown(DEVICE)
+    op = wait(ops)
+    msgs = [s["msg"] for s in op["steps"]]
+    assert op["state"] == "success"
+    assert "started in the background" in msgs
+    assert any("Progress command failed" in m for m in msgs)
