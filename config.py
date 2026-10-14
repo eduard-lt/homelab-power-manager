@@ -1,18 +1,28 @@
 """
 Configuration management for Homelab Power Manager.
 Reads and writes config.yaml. Auto-migrates from old config.json on first run.
+
+The parsed config is cached and only re-read when the file changes: PyYAML is slow
+on a Pi 2 and the dashboard asks for the config several times a second.
 """
 
+import copy
 import json
 import logging
 import os
 
 import yaml
 
+# libyaml-backed loader/dumper when available (much faster on the Pi)
+_Loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+_Dumper = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
+
 logger = logging.getLogger(__name__)
 
 CONFIG_FILE = "config.yaml"           # primary config
 LEGACY_JSON_FILE = "config.json"      # auto-migrated on first run
+
+_cache: dict = {"key": None, "cfg": None}  # last parsed config + (path, mtime, size)
 
 DEFAULT_CONFIG = {
     "settings_password": "admin",
@@ -35,6 +45,7 @@ def _default_device(name="", ip="", mac=""):
         "ssh_username": "",
         "ssh_key_passphrase": "",
         "shutdown_command": "suspend-now",
+        "status_command": "",
         "tautulli_ip": "",
         "tautulli_port": 7979,
         "tautulli_apikey": "",
@@ -59,19 +70,25 @@ def load_config() -> dict:
     if not os.path.exists(CONFIG_FILE):
         _save_yaml(DEFAULT_CONFIG)
         logger.info(f"Created new configuration file: {CONFIG_FILE}")
-        return dict(DEFAULT_CONFIG)
+        return copy.deepcopy(DEFAULT_CONFIG)
 
     try:
+        st = os.stat(CONFIG_FILE)
+        key = (CONFIG_FILE, st.st_mtime_ns, st.st_size)
+        if _cache["key"] == key:
+            return copy.deepcopy(_cache["cfg"])
         with open(CONFIG_FILE, "r") as f:
-            cfg = yaml.safe_load(f) or {}
+            cfg = yaml.load(f, Loader=_Loader) or {}
     except (yaml.YAMLError, IOError) as e:
         logger.error(f"Error parsing {CONFIG_FILE}: {e}. Using defaults.")
-        return dict(DEFAULT_CONFIG)
+        return copy.deepcopy(DEFAULT_CONFIG)
 
     # Fill in any missing top-level keys
     changed = _ensure_defaults(cfg)
     if changed:
         _save_yaml(cfg)
+    else:
+        _cache["key"], _cache["cfg"] = key, copy.deepcopy(cfg)
 
     return cfg
 
@@ -103,7 +120,7 @@ def save_config_raw(raw_yaml: str) -> tuple[bool, str]:
     """
     # Validate by parsing
     try:
-        cfg = yaml.safe_load(raw_yaml)
+        cfg = yaml.load(raw_yaml, Loader=_Loader)
         if not isinstance(cfg, dict):
             return False, "YAML must be a dictionary (key-value pairs)."
         if "devices" not in cfg or not isinstance(cfg["devices"], list):
@@ -114,6 +131,7 @@ def save_config_raw(raw_yaml: str) -> tuple[bool, str]:
     try:
         with open(CONFIG_FILE, "w") as f:
             f.write(raw_yaml)
+        _cache["key"] = None
         return True, ""
     except IOError as e:
         return False, f"Failed to write config: {e}"
@@ -146,9 +164,11 @@ def has_tautulli(device: dict) -> bool:
 
 def _save_yaml(cfg: dict) -> None:
     """Write config dict as pretty YAML with comments."""
+    _cache["key"] = None
     try:
         with open(CONFIG_FILE, "w") as f:
-            yaml.dump(cfg, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+            yaml.dump(cfg, f, Dumper=_Dumper, default_flow_style=False, sort_keys=False,
+                      allow_unicode=True)
     except IOError as e:
         logger.error(f"Failed to save configuration: {e}")
 

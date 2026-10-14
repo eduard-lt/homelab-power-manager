@@ -1,574 +1,445 @@
 <!DOCTYPE html>
-<link rel="apple-touch-icon" href="/static/power-on-512.png">
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Homelab Power Manager</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>Homelab Power</title>
     <link rel="manifest" href="/manifest.json">
+    <link rel="apple-touch-icon" href="/static/power-on-512.png">
     <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="Power Mgr">
-
-    <style>
-        :root {
-            --bg: #121212;
-            --text: #fff;
-            --surface: #1e1e1e;
-            --border: #333;
-            --tab-bg: #2a2a2a;
-            --tab-active: #121212;
-            --log-bg: #1a1a1a;
-            --stream-bg: #252525;
-            --muted: #888;
-            --green: #4CAF50;
-            --red: #f44336;
-            --blue: #2196F3;
-            --orange: #ff9800;
-        }
-
-        [data-theme="light"] {
-            --bg: #fff;
-            --text: #111;
-            --surface: #f5f5f5;
-            --border: #ddd;
-            --tab-bg: #e8e8e8;
-            --tab-active: #fff;
-            --log-bg: #fafafa;
-            --stream-bg: #f0f0f0;
-            --muted: #666;
-        }
-
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 16px;
-            background: var(--bg);
-            color: var(--text);
-            transition: background 0.2s, color 0.2s;
-        }
-
-        h1 {
-            font-size: 1.3rem;
-            margin-bottom: 16px;
-        }
-
-        /* Theme toggle */
-        #theme-toggle {
-            position: fixed;
-            top: 16px;
-            right: 16px;
-            padding: 8px;
-            background: transparent;
-            color: var(--text);
-            border: none;
-            cursor: pointer;
-            z-index: 100;
-            width: 40px;
-            height: 40px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            border-radius: 50%;
-            font-size: 1.3rem;
-            transition: background 0.2s;
-        }
-        #theme-toggle:hover { background: var(--surface); }
-
-        /* Tabs */
-        .tabs {
-            display: flex;
-            border-bottom: 1px solid var(--border);
-            margin-bottom: 16px;
-            gap: 2px;
-            overflow-x: auto;
-            -webkit-overflow-scrolling: touch;
-        }
-        .tab {
-            padding: 10px 18px;
-            cursor: pointer;
-            background: var(--tab-bg);
-            border: 1px solid var(--border);
-            border-bottom: none;
-            border-radius: 8px 8px 0 0;
-            color: var(--text);
-            font-size: 0.9rem;
-            white-space: nowrap;
-            transition: background 0.2s;
-            flex-shrink: 0;
-        }
-        .tab.active, .tab:hover {
-            background: var(--tab-active);
-            border-bottom: 1px solid var(--tab-active);
-            margin-bottom: -1px;
-        }
-        .tab.settings-tab { margin-left: auto; font-weight: bold; }
-
-        .tab-content { display: none; }
-        .tab-content.active { display: block; }
-
-        /* Status */
-        .status {
-            margin: 12px 0;
-            padding: 12px 16px;
-            background: var(--surface);
-            border-radius: 8px;
-            font-size: 0.95rem;
-            line-height: 1.5;
-        }
-
-        /* Controls */
-        .controls {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 10px;
-            margin: 12px 0;
-        }
-        button {
-            padding: 10px 18px;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            font-size: 0.9rem;
-            font-weight: 600;
-            color: #fff;
-            transition: opacity 0.2s, transform 0.1s;
-        }
-        button:active { transform: scale(0.97); }
-        button:disabled { opacity: 0.4; cursor: not-allowed; }
-        button.on { background: var(--green); }
-        button.off { background: var(--red); }
-        button.schedule { background: var(--orange); }
-        button.refresh { background: var(--blue); }
-
-        select {
-            padding: 10px 12px;
-            font-size: 0.9rem;
-            background: var(--surface);
-            color: var(--text);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-        }
-
-        .msg { margin-top: 8px; font-style: italic; color: var(--muted); }
-        .err { margin-top: 8px; color: var(--red); padding: 8px; border-radius: 6px; background: rgba(244,67,54,0.1); }
-
-        /* Plex streams */
-        .plex-section { margin-top: 20px; }
-        .plex-section h3 {
-            font-size: 0.85rem;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            color: var(--muted);
-            margin-bottom: 8px;
-        }
-        .plex-stream-card {
-            background: var(--stream-bg);
-            border-radius: 8px;
-            padding: 10px 14px;
-            margin-bottom: 6px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            font-size: 0.9rem;
-        }
-        .plex-stream-icon { font-size: 1.2rem; flex-shrink: 0; }
-        .plex-stream-info { flex: 1; min-width: 0; }
-        .plex-stream-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .plex-stream-meta { font-size: 0.8rem; color: var(--muted); margin-top: 2px; }
-
-        /* Logs */
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 12px;
-            font-size: 0.85rem;
-        }
-        th, td {
-            padding: 8px 10px;
-            text-align: left;
-            border-bottom: 1px solid var(--border);
-        }
-        th { background: var(--surface); font-weight: 600; }
-        .log-container {
-            max-height: 350px;
-            overflow-y: auto;
-            border: 1px solid var(--border);
-            padding: 12px;
-            background: var(--log-bg);
-            font-family: monospace;
-            font-size: 0.8rem;
-            margin-top: 12px;
-            border-radius: 8px;
-            white-space: pre-wrap;
-            word-break: break-all;
-        }
-
-        /* Mobile */
-        @media (max-width: 600px) {
-            body { padding: 10px; }
-            .controls { flex-direction: column; }
-            .controls button, .controls select { width: 100%; }
-            .tab { padding: 8px 14px; font-size: 0.85rem; }
-        }
-    </style>
+    <meta name="theme-color" content="#0f1115">
+    <script>
+        // Set the theme before first paint (no flash)
+        try { document.documentElement.dataset.theme = localStorage.getItem('homelab_pm_theme') || 'dark'; } catch (e) {}
+    </script>
+    <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-    <button id="theme-toggle" aria-label="Toggle theme">🌙</button>
-    <h1>Homelab Power Manager</h1>
+<div class="wrap">
+    <header class="top">
+        <h1 id="pageTitle">Homelab</h1>
+        <button class="icon-btn" id="themeBtn" aria-label="Toggle theme">◐</button>
+    </header>
 
-    <div class="tabs" id="tabBar">
-        <!-- Populated dynamically -->
-    </div>
+    <div id="connBanner" class="banner err" hidden>Can't reach the Pi - retrying…</div>
 
-    <div id="tabContents">
-        <!-- Device tabs and content populated dynamically -->
-    </div>
+    <!-- ===================== Home ===================== -->
+    <section id="view-home">
+        <div id="devices"><div class="card empty">Loading…</div></div>
+    </section>
 
-    <script>
-        // ==================================================================
-        // Theme
-        // ==================================================================
-        const THEME_KEY = 'homelab_pm_theme';
-        function getTheme() { return localStorage.getItem(THEME_KEY) || 'dark'; }
-        function setTheme(t) {
-            localStorage.setItem(THEME_KEY, t);
-            document.documentElement.setAttribute('data-theme', t);
-            document.getElementById('theme-toggle').textContent = t === 'dark' ? '🌙' : '☀️';
+    <!-- ===================== Logs ===================== -->
+    <section id="view-logs" hidden>
+        <div class="seg" role="tablist">
+            <button class="active" data-logtab="events">Activity</button>
+            <button data-logtab="system">System log</button>
+        </div>
+
+        <div id="log-events">
+            <div class="chips" id="evChips">
+                <button class="chip active" data-cat="all">All</button>
+                <button class="chip" data-cat="power">Power</button>
+                <button class="chip" data-cat="problems">Problems</button>
+            </div>
+            <div id="evList"></div>
+            <button class="btn ghost block more" id="evMore" hidden>Load older</button>
+        </div>
+
+        <div id="log-system" hidden>
+            <div class="row" style="margin-bottom:12px">
+                <select id="sysLevel" aria-label="Level" style="flex:0 0 120px">
+                    <option value="">All levels</option>
+                    <option value="INFO">Info</option>
+                    <option value="WARNING">Warnings</option>
+                    <option value="ERROR">Errors</option>
+                </select>
+                <input id="sysQuery" type="search" placeholder="Search…" autocomplete="off">
+            </div>
+            <div class="card" style="padding:4px 12px"><ul class="syslog" id="sysList"></ul></div>
+            <button class="btn ghost block more" id="sysMore" hidden>Load older</button>
+        </div>
+    </section>
+</div>
+
+<nav class="nav">
+    <a href="#home" data-view="home" class="active"><span class="i">⏻</span>Home</a>
+    <a href="#logs" data-view="logs"><span class="i">☰</span>Logs</a>
+    <a href="/settings"><span class="i">⚙</span>Settings</a>
+</nav>
+
+<script>
+(() => {
+    'use strict';
+    const $ = (s, el = document) => el.querySelector(s);
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const sid = (name) => String(name).replace(/[^a-zA-Z0-9_-]/g, '_');
+
+    // ------------------------------------------------------------ time helpers
+    const pad = (n) => String(n).padStart(2, '0');
+    const hm = (ts) => { const d = new Date(ts * 1000); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+    const hms = (ts) => { const d = new Date(ts * 1000); return `${hm(ts)}:${pad(d.getSeconds())}`; };
+    function dur(sec) {
+        sec = Math.max(0, Math.round(sec));
+        if (sec < 60) return `${sec}s`;
+        const m = Math.floor(sec / 60);
+        if (m < 60) return `${m}m`;
+        const h = Math.floor(m / 60);
+        if (h < 48) return `${h}h ${pad(m % 60)}m`;
+        return `${Math.floor(h / 24)}d`;
+    }
+    function dayLabel(ts) {
+        const d = new Date(ts * 1000), today = new Date();
+        const key = (x) => x.toDateString();
+        if (key(d) === key(today)) return 'Today';
+        const y = new Date(); y.setDate(y.getDate() - 1);
+        if (key(d) === key(y)) return 'Yesterday';
+        return d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+    }
+
+    // ------------------------------------------------------------ theme
+    $('#themeBtn').addEventListener('click', () => {
+        const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+        document.documentElement.dataset.theme = t;
+        try { localStorage.setItem('homelab_pm_theme', t); } catch (e) {}
+    });
+
+    // ------------------------------------------------------------ toast
+    let toastTimer;
+    function toast(msg) {
+        let el = $('.toast');
+        if (!el) { el = document.createElement('div'); el.className = 'toast'; document.body.appendChild(el); }
+        el.textContent = msg;
+        el.hidden = false;
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => { el.hidden = true; }, 3500);
+    }
+
+    // ------------------------------------------------------------ API
+    async function api(url, body) {
+        const opts = body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {};
+        const r = await fetch(url, opts);
+        return r.json();
+    }
+    async function control(device, action, extra = {}) {
+        try {
+            const data = await api('/api/control', { device, action, ...extra });
+            if (!data.success && data.message) toast(data.message);
+            return data;
+        } catch (e) {
+            toast('Could not reach the Pi');
+            return { success: false };
+        } finally {
+            poll(true);
         }
-        document.getElementById('theme-toggle').addEventListener('click', () => {
-            setTheme(getTheme() === 'dark' ? 'light' : 'dark');
-        });
-        setTheme(getTheme());
+    }
 
-        // ==================================================================
-        // State
-        // ==================================================================
-        let devices = [];
+    // ------------------------------------------------------------ dashboard
+    const cards = {};          // device name -> { el, parts: {key: lastHtml} }
+    let lastStatus = null;
+    let restricted = { active: false, start: 2, end: 7 };
 
-        async function fetchDevices() {
-            try {
-                const resp = await fetch('/api/devices');
-                devices = await resp.json();
-                buildTabs();
-                updateAllStatuses();
-            } catch (e) {
-                console.error('Failed to fetch devices:', e);
-            }
-        }
+    function setPart(card, key, html) {
+        if (card.parts[key] === html) return;   // only touch the DOM when something changed
+        card.parts[key] = html;
+        $(`[data-part="${key}"]`, card.el).innerHTML = html;
+    }
 
-        // ==================================================================
-        // Build dynamic tabs
-        // ==================================================================
-        function buildTabs() {
-            const tabBar = document.getElementById('tabBar');
-            const tabContents = document.getElementById('tabContents');
+    function ensureCard(dev) {
+        if (cards[dev.name]) return cards[dev.name];
+        const el = document.createElement('article');
+        el.className = 'card device';
+        el.id = 'dev-' + sid(dev.name);
+        el.innerHTML = `
+            <div data-part="head"></div>
+            <div data-part="streams"></div>
+            <div data-part="sched"></div>
+            <div class="dev-section">
+                <button class="btn block" data-act="primary" disabled>…</button>
+                <div data-part="hint"></div>
+                <div class="row dev-section" data-role="schedule" hidden>
+                    <select aria-label="Shut down after">
+                        <option value="0.5">in 30 min</option>
+                        <option value="1" selected>in 1 hour</option>
+                        <option value="2">in 2 hours</option>
+                        <option value="3">in 3 hours</option>
+                        <option value="4">in 4 hours</option>
+                        <option value="6">in 6 hours</option>
+                        <option value="8">in 8 hours</option>
+                        <option value="12">in 12 hours</option>
+                    </select>
+                    <button class="btn ghost sm" data-act="schedule">Schedule off</button>
+                </div>
+            </div>
+            <div data-part="op"></div>`;
+        const card = { el, parts: {}, confirmUntil: 0 };
+        el.addEventListener('click', (e) => onCardClick(dev.name, card, e));
+        cards[dev.name] = card;
+        return card;
+    }
 
-            // Keep existing active tab if possible
-            const activeTab = tabBar.querySelector('.tab.active');
-            const activeName = activeTab ? activeTab.dataset.tab : null;
+    function onCardClick(name, card, e) {
+        const btn = e.target.closest('[data-act]');
+        if (!btn || btn.disabled) return;
+        const act = btn.dataset.act;
+        const dev = (lastStatus?.devices || []).find(d => d.name === name);
+        if (!dev) return;
 
-            tabBar.innerHTML = '';
-            tabContents.innerHTML = '';
-
-            // Device tabs
-            devices.forEach((dev, idx) => {
-                const isActive = (activeName === dev.name) || (!activeName && idx === 0);
-
-                // Tab header
-                const tab = document.createElement('div');
-                tab.className = 'tab' + (isActive ? ' active' : '');
-                tab.dataset.tab = dev.name;
-                tab.textContent = dev.name;
-                tab.addEventListener('click', () => showTab(dev.name));
-                tabBar.appendChild(tab);
-
-                // Tab content
-                const content = document.createElement('div');
-                content.id = `tab-${sanitizeId(dev.name)}`;
-                content.className = 'tab-content' + (isActive ? ' active' : '');
-                content.innerHTML = `
-                    <div class="status" id="status-${sanitizeId(dev.name)}">Checking...</div>
-                    <div class="controls" id="controls-${sanitizeId(dev.name)}"></div>
-                    <div class="msg" id="msg-${sanitizeId(dev.name)}"></div>
-                    <div class="err" id="err-${sanitizeId(dev.name)}"></div>
-                    <div class="plex-section" id="plex-${sanitizeId(dev.name)}" style="display:none">
-                        <h3>&#9654; Plex &mdash; Active Streams</h3>
-                        <div id="plexStreams-${sanitizeId(dev.name)}"></div>
-                    </div>
-                `;
-                tabContents.appendChild(content);
-
-                // Build controls
-                buildControls(dev);
-            });
-
-            // Logs tab
-            {
-                const tab = document.createElement('div');
-                tab.className = 'tab' + (activeName === '__logs__' ? ' active' : '');
-                tab.dataset.tab = '__logs__';
-                tab.textContent = 'Logs';
-                tab.addEventListener('click', () => showTab('__logs__'));
-                tabBar.appendChild(tab);
-
-                const content = document.createElement('div');
-                content.id = 'tab-__logs__';
-                content.className = 'tab-content' + (activeName === '__logs__' ? ' active' : '');
-                content.innerHTML = `
-                    <h2>Activity Logs</h2>
-                    <button class="refresh" onclick="loadActivityLogs()">Refresh</button>
-                    <table id="activity-logs"><thead><tr><th>Timestamp</th><th>Action</th><th>Result</th><th>Details</th></tr></thead><tbody></tbody></table>
-                    <h2 style="margin-top:20px">System Logs</h2>
-                    <button class="refresh" onclick="loadSystemLogs()">Refresh</button>
-                    <div class="log-container" id="system-logs">Loading...</div>
-                `;
-                tabContents.appendChild(content);
-            }
-
-            // Settings tab
-            {
-                const tab = document.createElement('div');
-                tab.className = 'tab settings-tab' + (activeName === '__settings__' ? ' active' : '');
-                tab.dataset.tab = '__settings__';
-                tab.textContent = '⚙ Settings';
-                tab.addEventListener('click', () => showTab('__settings__'));
-                tabBar.appendChild(tab);
-
-                const content = document.createElement('div');
-                content.id = 'tab-__settings__';
-                content.className = 'tab-content' + (activeName === '__settings__' ? ' active' : '');
-                content.innerHTML = '<p style="margin-top:16px">Redirecting to settings page...</p>';
-                tabContents.appendChild(content);
-            }
-        }
-
-        function sanitizeId(name) {
-            return name.replace(/[^a-zA-Z0-9_-]/g, '_');
-        }
-
-        function showTab(name) {
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-
-            const tab = document.querySelector(`.tab[data-tab="${CSS.escape(name)}"]`);
-            const content = document.getElementById(`tab-${sanitizeId(name)}`);
-            if (tab) tab.classList.add('active');
-            if (content) content.classList.add('active');
-
-            if (name === '__logs__') {
-                loadActivityLogs();
-                loadSystemLogs();
-            }
-            if (name === '__settings__') {
-                window.location.href = '/settings';
-            }
-        }
-
-        // ==================================================================
-        // Build controls per device
-        // ==================================================================
-        function buildControls(dev) {
-            const ctrl = document.getElementById(`controls-${sanitizeId(dev.name)}`);
-            let html = `<button class="on" id="btnOn-${sanitizeId(dev.name)}">Turn On (WoL)</button>`;
-
-            if (dev.has_ssh) {
-                html += `<button class="off" id="btnOff-${sanitizeId(dev.name)}">Turn Off (SSH)</button>`;
-                html += `<select id="hours-${sanitizeId(dev.name)}" aria-label="Shutdown delay">
-                    <option value="1">1h</option><option value="2">2h</option>
-                    <option value="3">3h</option><option value="4">4h</option>
-                    <option value="8">8h</option><option value="12">12h</option>
-                </select>`;
-                html += `<button class="schedule" id="btnSched-${sanitizeId(dev.name)}">Turn Off After</button>`;
-            }
-
-            ctrl.innerHTML = html;
-
-            // Wire up events
-            document.getElementById(`btnOn-${sanitizeId(dev.name)}`).addEventListener('click', () => {
-                controlDevice(dev.name, 'turn_on');
-            });
-
-            if (dev.has_ssh) {
-                document.getElementById(`btnOff-${sanitizeId(dev.name)}`).addEventListener('click', () => {
-                    controlDevice(dev.name, 'turn_off');
-                });
-                document.getElementById(`btnSched-${sanitizeId(dev.name)}`).addEventListener('click', () => {
-                    const hours = document.getElementById(`hours-${sanitizeId(dev.name)}`).value;
-                    controlDevice(dev.name, 'schedule_off', { hours: hours });
-                });
-            }
-        }
-
-        // ==================================================================
-        // Status polling
-        // ==================================================================
-        async function updateAllStatuses() {
-            try {
-                const resp = await fetch('/api/status');
-                const data = await resp.json();
-
-                for (const ds of data.devices) {
-                    updateDeviceStatus(ds);
-                }
-
-                // Update restricted hours state
-                const restricted = data.restricted_hours;
-                for (const dev of devices) {
-                    const btnOn = document.getElementById(`btnOn-${sanitizeId(dev.name)}`);
-                    if (btnOn) {
-                        const ds = data.devices.find(d => d.name === dev.name);
-                        btnOn.disabled = (ds && ds.online) || restricted;
-                    }
-                }
-            } catch (e) {
-                console.error('Status fetch error:', e);
-            }
-        }
-
-        function updateDeviceStatus(ds) {
-            const statusEl = document.getElementById(`status-${sanitizeId(ds.name)}`);
-            if (!statusEl) return;
-
-            let text = `Status: <strong>${ds.online ? 'ONLINE' : 'OFFLINE'}</strong>`;
-            statusEl.innerHTML = text;
-
-            // Buttons
-            const btnOn = document.getElementById(`btnOn-${sanitizeId(ds.name)}`);
-            if (btnOn) btnOn.disabled = ds.online;
-
-            if (ds.has_ssh) {
-                const btnOff = document.getElementById(`btnOff-${sanitizeId(ds.name)}`);
-                const btnSched = document.getElementById(`btnSched-${sanitizeId(ds.name)}`);
-                if (btnOff) btnOff.disabled = !ds.online;
-                if (btnSched) btnSched.disabled = !ds.online;
-            }
-
-            // Plex streams
-            if (ds.has_tautulli && ds.streams && ds.streams.length > 0) {
-                const section = document.getElementById(`plex-${sanitizeId(ds.name)}`);
-                const container = document.getElementById(`plexStreams-${sanitizeId(ds.name)}`);
-                if (section) section.style.display = 'block';
-                if (container) {
-                    container.innerHTML = ds.streams.map(s => {
-                        const icon = s.type === 'movie' ? '🎬' : (s.type === 'episode' ? '📺' : '🎵');
-                        const meta = [s.user, s.quality].filter(Boolean).join(' · ');
-                        return `<div class="plex-stream-card">
-                            <span class="plex-stream-icon">${icon}</span>
-                            <div class="plex-stream-info">
-                                <div class="plex-stream-title">${escapeHtml(s.title)}</div>
-                                ${meta ? '<div class="plex-stream-meta">' + escapeHtml(meta) + '</div>' : ''}
-                            </div>
-                        </div>`;
-                    }).join('');
+        if (act === 'primary') {
+            if (dev.online) {
+                // Two taps to shut down - no accidental goodnights from a pocket
+                if (Date.now() < card.confirmUntil) {
+                    card.confirmUntil = 0;
+                    control(name, 'turn_off');
+                } else {
+                    card.confirmUntil = Date.now() + 3500;
+                    renderDevice(dev);
+                    setTimeout(() => renderDevice((lastStatus?.devices || []).find(d => d.name === name) || dev), 3600);
                 }
             } else {
-                const section = document.getElementById(`plex-${sanitizeId(ds.name)}`);
-                if (section) section.style.display = 'none';
+                control(name, 'turn_on');
+            }
+        } else if (act === 'schedule') {
+            const hours = $('[data-role="schedule"] select', card.el).value;
+            control(name, 'schedule_off', { hours }).then(d => { if (d.success) toast(`${name} will shut down at ${hm(d.scheduled_at)}`); });
+        } else if (act === 'cancel-schedule') {
+            control(name, 'cancel_schedule').then(d => { if (d.success) toast('Scheduled shutdown cancelled'); });
+        } else if (act === 'force') {
+            control(name, 'turn_off', { force: true });
+        } else if (act === 'dismiss') {
+            control(name, 'dismiss');
+        }
+    }
+
+    const STREAM_ICON = { movie: '🎬', episode: '📺', track: '🎵' };
+    const LEVEL_ICON = { ok: '✓', done: '☾', busy: '!', warn: '!', error: '✕', step: '›', info: '•', wait: '…' };
+
+    function timelineHtml(steps, running) {
+        return `<ol class="timeline">${steps.map((s, i) => {
+            const last = running && i === steps.length - 1;
+            const ico = last ? '<span class="spin"></span>' : (LEVEL_ICON[s.level] || '•');
+            const msg = s.msg ? s.msg[0].toUpperCase() + s.msg.slice(1) : '';
+            return `<li class="lv-${esc(s.level)}"><span class="ico">${ico}</span><span>${esc(msg)}</span><span class="t">${hms(s.t)}</span></li>`;
+        }).join('')}</ol>`;
+    }
+
+    function renderDevice(dev) {
+        const card = ensureCard(dev);
+        const op = dev.op;
+        const running = op && op.state === 'running';
+        const now = lastStatus ? lastStatus.now : Date.now() / 1000;
+
+        // Header + status pill
+        let pill, sub;
+        if (running) {
+            pill = `<span class="pill busy">${op.kind === 'wake' ? 'Waking' : 'Shutting down'}</span>`;
+        } else if (dev.online === null) {
+            pill = '<span class="pill">Checking</span>';
+        } else {
+            pill = dev.online ? '<span class="pill on">Online</span>' : '<span class="pill">Offline</span>';
+        }
+        if (dev.online === null) sub = 'Checking status…';
+        else if (dev.since) sub = `${dev.online ? 'Up' : 'Off'} since ${hm(dev.since)} · ${dur(now - dev.since)}`;
+        else sub = dev.online ? 'Up and reachable' : 'Not responding to ping';
+        setPart(card, 'head', `<div class="dev-head"><div><h2>${esc(dev.name)}</h2><div class="dev-sub">${sub}</div></div>${pill}</div>`);
+
+        // Plex streams
+        const streams = dev.streams || [];
+        setPart(card, 'streams', streams.length ? `<div class="dev-section"><div class="label">Now playing on Plex</div>${streams.map(s => `
+            <div class="stream"><span class="icon">${STREAM_ICON[s.type] || '▶'}</span><div>
+                <b>${esc(s.title)}</b>
+                <div class="small muted">${esc([s.user, s.state, s.quality].filter(Boolean).join(' · '))}</div>
+            </div></div>`).join('')}</div>` : '');
+
+        // Scheduled shutdown banner
+        const sc = dev.scheduled;
+        setPart(card, 'sched', sc ? `<div class="dev-section sched"><span>⏰ Shuts down at <b>${hm(sc.at)}</b> (in ${dur(sc.at - now)})${sc.retries ? ` · retry ${sc.retries}` : ''}</span>
+            <button class="btn ghost sm" data-act="cancel-schedule">Cancel</button></div>` : '');
+
+        // Primary button
+        const btn = $('[data-act="primary"]', card.el);
+        const confirming = Date.now() < card.confirmUntil && dev.online && !running;
+        let label, cls, disabled = false, hint = '';
+        if (running) {
+            label = op.kind === 'wake' ? 'Waking up…' : 'Shutting down…'; cls = 'ghost'; disabled = true;
+        } else if (dev.online === null) {
+            label = 'Checking…'; cls = 'ghost'; disabled = true;
+        } else if (dev.online) {
+            if (!dev.has_ssh) { label = 'Online'; cls = 'ghost'; disabled = true; hint = 'Add SSH details in Settings to enable shutdown.'; }
+            else if (confirming) { label = 'Tap again to shut down'; cls = 'confirm'; }
+            else { label = '☾ Good night'; cls = 'sleep'; }
+        } else {
+            label = '⏻ Wake up'; cls = 'wake';
+            if (lastStatus.restricted_hours) {
+                disabled = true;
+                hint = `Quiet hours: wake-ups are blocked ${pad(restricted.start)}:00–${pad(restricted.end)}:00.`;
             }
         }
+        btn.textContent = label;
+        btn.className = `btn block ${cls}`;
+        btn.disabled = disabled;
+        btn.hidden = op && op.state === 'blocked';   // the timeline offers the choice instead
+        setPart(card, 'hint', hint ? `<p class="hint">${esc(hint)}</p>` : '');
+        $('[data-role="schedule"]', card.el).hidden = !(dev.online && dev.has_ssh && !running && !sc) || btn.hidden;
 
-        function escapeHtml(str) {
-            const div = document.createElement('div');
-            div.textContent = str;
-            return div.innerHTML;
+        // Operation timeline
+        let opHtml = '';
+        if (op) {
+            const stateTxt = { running: dur(now - op.started), success: 'Done', failed: 'Failed', blocked: 'On hold' }[op.state] || op.state;
+            const pillCls = { running: 'busy', success: 'on', blocked: 'busy' }[op.state] || '';
+            opHtml = `<div class="op"><div class="op-head"><strong>${esc(op.title)}</strong><span class="pill ${pillCls}">${esc(stateTxt)}</span></div>
+                ${timelineHtml(op.steps, running)}
+                ${op.state === 'blocked' ? `<div class="op-actions">
+                    <button class="btn ghost" data-act="dismiss">Keep it on</button>
+                    <button class="btn danger" data-act="force">Shut down anyway</button></div>` : ''}
+                ${op.state === 'success' || op.state === 'failed' ? `<div class="op-actions"><button class="btn ghost sm" data-act="dismiss">Dismiss</button></div>` : ''}
+            </div>`;
         }
+        setPart(card, 'op', opHtml);
+    }
 
-        // ==================================================================
-        // Control actions
-        // ==================================================================
-        async function controlDevice(name, action, extra = {}) {
-            const sid = sanitizeId(name);
-            const msgEl = document.getElementById(`msg-${sid}`);
-            const errEl = document.getElementById(`err-${sid}`);
+    function renderStatus(data) {
+        lastStatus = data;
+        restricted = data.restricted || restricted;
+        const box = $('#devices');
+        if (!data.devices.length) {
+            box.innerHTML = '<div class="card empty">No devices yet. Add one in <a href="/settings">Settings</a>.</div>';
+            return;
+        }
+        const names = new Set(data.devices.map(d => d.name));
+        for (const n of Object.keys(cards)) if (!names.has(n)) { cards[n].el.remove(); delete cards[n]; }
+        if (box.querySelector('.empty')) box.innerHTML = '';
+        data.devices.forEach(dev => {
+            renderDevice(dev);
+            if (cards[dev.name].el.parentNode !== box) box.appendChild(cards[dev.name].el);
+        });
+    }
 
-            const messages = {
-                turn_on: 'Sending Wake-on-LAN...',
-                turn_off: 'Sending shutdown via SSH...',
-                schedule_off: 'Scheduling shutdown...'
-            };
-            if (msgEl) msgEl.textContent = messages[action] || '';
+    // ------------------------------------------------------------ polling
+    // Fast while something is happening, slow otherwise, paused in the background.
+    let pollTimer = null, inFlight = false;
+    async function poll(now) {
+        clearTimeout(pollTimer);
+        if (document.hidden) return;
+        if (inFlight && !now) return;
+        inFlight = true;
+        try {
+            const data = await api('/api/status');
+            $('#connBanner').hidden = true;
+            renderStatus(data);
+        } catch (e) {
+            $('#connBanner').hidden = false;
+        } finally {
+            inFlight = false;
+            const busy = lastStatus && lastStatus.devices.some(d => d.op && d.op.state === 'running');
+            if (!document.hidden) pollTimer = setTimeout(poll, busy ? 1500 : 5000);
+        }
+    }
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) { poll(true); if (view === 'logs') reloadLogs(); } });
 
-            try {
-                const resp = await fetch('/api/control', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ action, device: name, ...extra }),
-                });
-                const data = await resp.json();
+    // ------------------------------------------------------------ views
+    let view = 'home';
+    function showView(v) {
+        view = v === 'logs' ? 'logs' : 'home';
+        $('#view-home').hidden = view !== 'home';
+        $('#view-logs').hidden = view !== 'logs';
+        $('#pageTitle').textContent = view === 'logs' ? 'Logs' : 'Homelab';
+        document.querySelectorAll('.nav a[data-view]').forEach(a => a.classList.toggle('active', a.dataset.view === view));
+        if (view === 'logs') reloadLogs();
+    }
+    window.addEventListener('hashchange', () => showView(location.hash.slice(1)));
 
-                if (data.success) {
-                    if (errEl) errEl.textContent = '';
-                    if (msgEl) {
-                        const okMessages = {
-                            turn_on: 'Wake-on-LAN sent! Waiting for device...',
-                            turn_off: 'Shutdown command sent!',
-                            schedule_off: `Scheduled shutdown at ${data.scheduled_time || ''}`
-                        };
-                        msgEl.textContent = okMessages[action] || 'Done!';
-                        setTimeout(() => { if (msgEl) msgEl.textContent = ''; }, 4000);
-                    }
-                } else {
-                    if (msgEl) msgEl.textContent = '';
-                    if (errEl) errEl.textContent = data.message || 'Action failed.';
-                }
+    // ------------------------------------------------------------ logs: events
+    const KIND = {
+        wake: ['⏻', 'Wake'], shutdown: ['☾', 'Shutdown'], schedule: ['⏰', 'Schedule'],
+        state: ['◉', 'Status'], settings: ['⚙', 'Settings'], app: ['★', 'App'],
+    };
+    const GOOD = new Set(['success', 'online']), BAD = new Set(['failed', 'error', 'denied']), WARN = new Set(['blocked', 'retry']);
+    const RESULT_TXT = { success: '', online: '', offline: '', failed: 'Failed', denied: 'Denied', blocked: 'Blocked', retry: 'Retrying', cancelled: 'Cancelled', error: 'Error' };
+    let evCat = 'all', evOldest = null, logTab = 'events';
 
-                await updateAllStatuses();
-            } catch (e) {
-                console.error('Control error:', e);
-                if (msgEl) msgEl.textContent = '';
-                if (errEl) errEl.textContent = 'Error communicating with server.';
+    function evHtml(ev) {
+        const [icon, kindTxt] = KIND[ev.kind] || ['•', ev.kind];
+        const r = GOOD.has(ev.result) ? 'r-good' : BAD.has(ev.result) ? 'r-bad' : WARN.has(ev.result) ? 'r-warn' : '';
+        const meta = [kindTxt, RESULT_TXT[ev.result], hm(ev.ts), ev.duration ? dur(ev.duration) : '', ev.source === 'schedule' ? 'scheduled' : '', ev.ip ? `from ${ev.ip}` : '']
+            .filter(Boolean).join(' · ');
+        const head = `<span class="badge ${r}">${icon}</span><div class="ev-body"><div class="ev-title">${esc(ev.msg)}</div><div class="ev-meta">${esc(meta)}</div></div>`;
+        if (ev.steps && ev.steps.length) {
+            return `<li class="ev"><details><summary>${head}<span class="chev">›</span></summary>${timelineHtml(ev.steps, false)}</details></li>`;
+        }
+        return `<li class="ev"><div class="ev-row">${head}</div></li>`;
+    }
+
+    let evDays = [];   // rendered day groups, so "load older" can append to the right one
+    async function loadEvents(reset) {
+        if (reset) { evOldest = null; evDays = []; $('#evList').innerHTML = ''; }
+        const q = new URLSearchParams({ limit: 40, category: evCat });
+        if (evOldest) q.set('before', evOldest);
+        let data;
+        try { data = await api('/api/events?' + q); } catch (e) { toast('Could not load logs'); return; }
+        const list = $('#evList');
+        if (reset && !data.events.length) list.innerHTML = '<div class="empty">Nothing here yet.</div>';
+        let html = '';
+        for (const ev of data.events) {
+            const day = dayLabel(ev.ts);
+            if (evDays[evDays.length - 1] !== day) {
+                evDays.push(day);
+                if (html) { list.insertAdjacentHTML('beforeend', html + '</ul>'); html = ''; }
+                list.insertAdjacentHTML('beforeend', `<div class="day">${esc(day)}</div>`);
+                html = '<ul class="events">';
+            } else if (!html) {
+                // continuing the last day from the previous page
+                const lists = list.querySelectorAll('ul.events');
+                lists[lists.length - 1].insertAdjacentHTML('beforeend', evHtml(ev));
+                evOldest = ev.ts;
+                continue;
             }
+            html += evHtml(ev);
+            evOldest = ev.ts;
         }
+        if (html) list.insertAdjacentHTML('beforeend', html + '</ul>');
+        $('#evMore').hidden = !data.has_more;
+    }
+    $('#evChips').addEventListener('click', (e) => {
+        const c = e.target.closest('.chip'); if (!c) return;
+        document.querySelectorAll('#evChips .chip').forEach(x => x.classList.toggle('active', x === c));
+        evCat = c.dataset.cat; loadEvents(true);
+    });
+    $('#evMore').addEventListener('click', () => loadEvents(false));
 
-        // ==================================================================
-        // Logs
-        // ==================================================================
-        async function loadActivityLogs() {
-            try {
-                const resp = await fetch('/api/logs?type=activity&limit=50');
-                const data = await resp.json();
-                const tbody = document.querySelector('#activity-logs tbody');
-                if (!tbody) return;
-                tbody.innerHTML = '';
-                if (Array.isArray(data)) {
-                    data.reverse().forEach(log => {
-                        tbody.innerHTML += `<tr><td>${log.timestamp}</td><td>${log.action}</td><td>${log.result}</td><td>${log.details||''}</td></tr>`;
-                    });
-                }
-            } catch (e) { console.error('Activity logs error:', e); }
-        }
+    // ------------------------------------------------------------ logs: system
+    let sysSkip = 0;
+    async function loadSystem(reset) {
+        if (reset) { sysSkip = 0; $('#sysList').innerHTML = ''; }
+        const q = new URLSearchParams({ type: 'system', limit: 150, skip: sysSkip, level: $('#sysLevel').value, q: $('#sysQuery').value });
+        let data;
+        try { data = await api('/api/logs?' + q); } catch (e) { toast('Could not load logs'); return; }
+        sysSkip += data.lines.length;
+        $('#sysList').insertAdjacentHTML('beforeend', data.lines.length || !reset ? data.lines.map(l =>
+            `<li><time>${esc(l.time.slice(5, 16))}</time><span class="lvl lvl-${esc(l.level)}">${esc(l.level === 'INFO' ? '' : l.level)}</span>${esc(l.msg)}</li>`).join('')
+            : '<li class="empty">No matching lines.</li>');
+        $('#sysMore').hidden = !data.has_more;
+    }
+    let searchTimer;
+    $('#sysQuery').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => loadSystem(true), 300); });
+    $('#sysLevel').addEventListener('change', () => loadSystem(true));
+    $('#sysMore').addEventListener('click', () => loadSystem(false));
 
-        async function loadSystemLogs() {
-            try {
-                const resp = await fetch('/api/logs?type=system&limit=100');
-                const data = await resp.json();
-                const container = document.getElementById('system-logs');
-                if (!container) return;
-                if (Array.isArray(data)) {
-                    container.textContent = data.join('');
-                    container.scrollTop = container.scrollHeight;
-                } else {
-                    container.textContent = 'No logs available.';
-                }
-            } catch (e) { console.error('System logs error:', e); }
-        }
+    document.querySelectorAll('[data-logtab]').forEach(b => b.addEventListener('click', () => {
+        logTab = b.dataset.logtab;
+        document.querySelectorAll('[data-logtab]').forEach(x => x.classList.toggle('active', x === b));
+        $('#log-events').hidden = logTab !== 'events';
+        $('#log-system').hidden = logTab !== 'system';
+        reloadLogs();
+    }));
+    function reloadLogs() { if (logTab === 'events') loadEvents(true); else loadSystem(true); }
 
-        // ==================================================================
-        // Init
-        // ==================================================================
-        fetchDevices();
-        setInterval(updateAllStatuses, 5000);
-        setInterval(() => {
-            const activeTab = document.querySelector('.tab.active');
-            if (activeTab && activeTab.dataset.tab === '__logs__') {
-                loadActivityLogs();
-                loadSystemLogs();
-            }
-        }, 10000);
-    </script>
+    // ------------------------------------------------------------ init
+    showView(location.hash.slice(1));
+    poll(true);
+})();
+</script>
 </body>
 </html>

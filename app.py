@@ -1,51 +1,71 @@
 """
 Homelab Power Manager — Flask web application.
-Provides remote Wake-on-LAN, SSH shutdown, scheduled shutdown,
-Plex/Tautulli stream monitoring, and a password-protected settings page.
+Provides remote Wake-on-LAN, SSH shutdown with a live step timeline, scheduled
+shutdown, Plex/Tautulli stream monitoring, an event log and a password-protected
+settings page.
 """
 
-import csv
-import logging
-import os
-import threading
 import datetime
+import logging
+import threading
+import time
 
 from flask import Flask, jsonify, render_template, request, send_from_directory
 
 import config as cfg
 import devices
 import logging_utils
+import monitor as monitor_mod
+import operations
 import plex
+
+SCHEDULE_RETRY_MINUTES = 30   # a scheduled shutdown blocked by activity tries again
+SCHEDULE_MAX_RETRIES = 6      # ...up to 3 hours later, then gives up
 
 # ---------------------------------------------------------------------------
 # App & logging setup
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 7 * 24 * 3600  # icons/css rarely change
 system_logger = logging_utils.setup_system_logger()
 
-# ---------------------------------------------------------------------------
-# Plex monitor (shared across devices)
-# ---------------------------------------------------------------------------
+# The dev server logs every request; on a Pi that is CPU and SD-card wear for nothing.
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
+
+def _on_state_change(name: str, online: bool) -> None:
+    if ops.is_running(name):
+        return  # the wake/shutdown operation logs this itself, with its timeline
+    msg = f"{name} came online" if online else f"{name} went offline"
+    system_logger.info(msg)
+    logging_utils.log_event("state", "online" if online else "offline", msg, device=name)
+
+
+def _on_op_finish(name: str, op: dict) -> None:
+    """Scheduled shutdowns that were blocked by activity try again later."""
+    entry = _schedules.get(name)
+    if not entry or op.get("source") != "schedule" or not entry.get("firing"):
+        return
+    if op["state"] == "blocked" and entry["retries"] < SCHEDULE_MAX_RETRIES:
+        entry["retries"] += 1
+        entry["firing"] = False
+        _arm_timer(name, time.time() + SCHEDULE_RETRY_MINUTES * 60)
+        at = datetime.datetime.fromtimestamp(entry["at"]).strftime("%H:%M")
+        logging_utils.log_event(
+            "schedule", "retry", f"{name} is in use - will try again at {at}", device=name
+        )
+    else:
+        _schedules.pop(name, None)
+
+
 plex_monitor = plex.PlexMonitor()
+monitor = monitor_mod.Monitor(
+    plex_monitor, on_change=_on_state_change, is_busy=lambda: ops.any_running()
+)
+ops = operations.Operations(monitor, on_finish=_on_op_finish)
 
-# ---------------------------------------------------------------------------
-# Scheduled shutdown timers (device_name -> threading.Timer)
-# ---------------------------------------------------------------------------
-off_timers: dict[str, threading.Timer] = {}
-
-
-# ---------------------------------------------------------------------------
-# Werkzeug TLS scanner noise suppression
-# ---------------------------------------------------------------------------
-class _TLSScannerFilter(logging.Filter):
-    def filter(self, record):
-        msg = record.getMessage()
-        if "Bad request version" in msg or "\x16\x03" in msg:
-            return False
-        return True
-
-
-logging.getLogger("werkzeug").addFilter(_TLSScannerFilter())
+# Scheduled shutdowns: device name -> {"at": epoch, "timer": Timer, "retries": n, "firing": bool}
+_schedules: dict[str, dict] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -53,8 +73,6 @@ logging.getLogger("werkzeug").addFilter(_TLSScannerFilter())
 # ---------------------------------------------------------------------------
 @app.route("/")
 def index():
-    system_logger.info("Web interface accessed")
-    logging_utils.log_activity("page_visit", "success", "Main page loaded")
     return render_template("index.html")
 
 
@@ -76,184 +94,172 @@ def manifest():
 def api_devices():
     """Return all configured devices (without sensitive fields)."""
     config = cfg.load_config()
-    devices_list = config.get("devices", [])
-
-    result = []
-    for d in devices_list:
-        result.append(
-            {
-                "name": d.get("name", ""),
-                "has_ssh": cfg.has_ssh(d),
-                "has_tautulli": cfg.has_tautulli(d),
-            }
-        )
-    return jsonify(result)
+    return jsonify([
+        {
+            "name": d.get("name", ""),
+            "has_ssh": cfg.has_ssh(d),
+            "has_tautulli": cfg.has_tautulli(d),
+        }
+        for d in config.get("devices", [])
+    ])
 
 
 @app.route("/api/status", methods=["GET"])
 def api_status():
-    """Return status for all devices + restricted hours info."""
+    """
+    Everything the dashboard shows, from the monitor's snapshot (no network I/O
+    here, so it answers instantly even when a device is offline).
+    """
+    monitor.demand()
     config = cfg.load_config()
-    devices_list = config.get("devices", [])
     restricted = config.get("restricted_hours", {"start": 2, "end": 7})
 
-    in_restricted = devices.check_restricted_hours(restricted)
-
     statuses = []
-    for d in devices_list:
+    for d in config.get("devices", []):
         name = d.get("name", "")
-        ip = d.get("ip", "")
-        online = devices.ping(ip) if ip else False
-        streams = []
-        if cfg.has_tautulli(d):
-            streams = plex_monitor.get_streams(d)
+        snap = monitor.snapshot(name)
+        if not monitor.running:
+            # No background thread (tests, or first start): ping inline once
+            monitor.set_online(name, devices.ping(d.get("ip", "")))
+            snap = monitor.snapshot(name)
+        sched = _schedules.get(name)
+        statuses.append({
+            "name": name,
+            "online": snap["online"],
+            "since": snap["since"],
+            "has_ssh": cfg.has_ssh(d),
+            "has_tautulli": cfg.has_tautulli(d),
+            "streams": snap["streams"],
+            "op": ops.current(name),
+            "scheduled": {"at": sched["at"], "retries": sched["retries"]} if sched else None,
+        })
 
-        # Check for scheduled timer
-        scheduled = None
-        timer = off_timers.get(name)
-        # We store scheduled times in a simple dict alongside the timer
-        # Since Timer doesn't let us query the remaining time easily,
-        # we track it separately
-        statuses.append(
-            {
-                "name": name,
-                "online": online,
-                "has_ssh": cfg.has_ssh(d),
-                "has_tautulli": cfg.has_tautulli(d),
-                "streams": streams,
-            }
-        )
-
-    # Gather scheduled off times
-    scheduled_times = {}
-    for name, timer in off_timers.items():
-        if timer and timer.is_alive():
-            # We store scheduled times in a module-level dict
-            scheduled_times[name] = _scheduled_off_times.get(name)
-
-    return jsonify(
-        {
-            "devices": statuses,
-            "restricted_hours": in_restricted,
-            "scheduled": scheduled_times,
-        }
-    )
-
-
-# Module-level dict for tracking scheduled shutdown times
-_scheduled_off_times: dict[str, str] = {}
+    return jsonify({
+        "devices": statuses,
+        "restricted_hours": devices.check_restricted_hours(restricted),
+        "restricted": {"start": restricted.get("start", 2), "end": restricted.get("end", 7)},
+        "now": time.time(),
+    })
 
 
 @app.route("/api/control", methods=["POST"])
 def api_control():
-    """Handle device control actions: turn_on, turn_off, schedule_off."""
-    data = request.json
+    """Device actions: turn_on, turn_off, schedule_off, cancel_schedule, dismiss."""
+    data = request.get_json(silent=True)
     if not data:
         return jsonify({"success": False, "message": "No data provided"}), 400
 
     action = data.get("action")
     device_name = data.get("device")
-    client_ip = request.remote_addr
+    client_ip = request.remote_addr or ""
 
     system_logger.info(f"Control action '{action}' for '{device_name}' from {client_ip}")
 
     config = cfg.load_config()
     device = cfg.get_device_by_name(config, device_name)
-
     if not device:
         return jsonify({"success": False, "message": f"Device '{device_name}' not found"}), 404
 
-    restricted = config.get("restricted_hours", {"start": 2, "end": 7})
-
     if action == "turn_on":
+        restricted = config.get("restricted_hours", {"start": 2, "end": 7})
         if devices.check_restricted_hours(restricted):
+            window = f"{restricted.get('start', 2):02d}:00–{restricted.get('end', 7):02d}:00"
+            msg = f"Wake-ups are blocked during quiet hours ({window})"
             system_logger.warning(f"Turn on denied for '{device_name}' during restricted hours")
-            logging_utils.log_activity("turn_on", "denied", f"Restricted hours - {device_name}")
-            return jsonify(
-                {
-                    "success": False,
-                    "message": "Cannot turn on during restricted hours (2 AM - 7 AM)",
-                }
-            )
+            logging_utils.log_event("wake", "denied", msg, device=device_name, ip=client_ip)
+            return jsonify({"success": False, "message": msg})
+        op = ops.start_wake(device, client_ip)
+        if op is None:
+            return jsonify({"success": False, "message": "Already working on it"}), 409
+        _cancel_schedule(device_name, quiet=True)
+        return jsonify({"success": True, "op": op})
 
-        success = devices.wake_device(device)
+    if action in ("turn_off", "schedule_off") and not cfg.has_ssh(device):
+        return jsonify({"success": False, "message": "SSH not configured for this device"}), 400
 
-        if success:
-            # Cancel any scheduled off timer for this device
-            _cancel_timer(device_name)
-            logging_utils.log_activity("turn_on", "success", device_name)
-        else:
-            logging_utils.log_activity("turn_on", "failed", device_name)
+    if action == "turn_off":
+        op = ops.start_shutdown(device, client_ip)
+        if op is None:
+            return jsonify({"success": False, "message": "A shutdown is already running"}), 409
+        _cancel_schedule(device_name, quiet=True)
+        return jsonify({"success": True, "op": op})
 
-        return jsonify({"success": success})
+    if action == "schedule_off":
+        try:
+            hours = float(data.get("hours", 1))
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "message": "Invalid delay"}), 400
+        if not 0 < hours <= 24:
+            return jsonify({"success": False, "message": "Delay must be between 0 and 24 hours"}), 400
+        at = schedule_device_off(device_name, hours, client_ip)
+        return jsonify({
+            "success": True,
+            "scheduled_at": at,
+            "scheduled_time": datetime.datetime.fromtimestamp(at).strftime("%Y-%m-%d %H:%M:%S"),
+        })
 
-    elif action == "turn_off":
-        if not cfg.has_ssh(device):
-            return jsonify(
-                {"success": False, "message": "SSH not configured for this device"}
-            ), 400
+    if action == "cancel_schedule":
+        cancelled = _cancel_schedule(device_name, client_ip=client_ip)
+        return jsonify({"success": cancelled})
 
-        success = devices.shutdown_device(device)
-
-        if success:
-            _cancel_timer(device_name)
-            logging_utils.log_activity("shutdown", "success", device_name)
-        else:
-            logging_utils.log_activity("shutdown", "failed", device_name)
-
-        return jsonify({"success": success})
-
-    elif action == "schedule_off":
-        hours = int(data.get("hours", 1))
-        if not cfg.has_ssh(device):
-            return jsonify(
-                {"success": False, "message": "SSH not configured for this device"}
-            ), 400
-
-        schedule_device_off(device_name, device, hours)
-        return jsonify(
-            {
-                "success": True,
-                "scheduled_time": _scheduled_off_times.get(device_name),
-            }
-        )
+    if action == "dismiss":
+        ops.dismiss(device_name)
+        return jsonify({"success": True})
 
     return jsonify({"success": False, "message": f"Invalid action: {action}"}), 400
 
 
-def _cancel_timer(device_name: str) -> None:
-    """Cancel a scheduled shutdown timer for a device if one exists."""
-    timer = off_timers.pop(device_name, None)
-    if timer:
-        timer.cancel()
-        system_logger.info(f"Cancelled scheduled shutdown for '{device_name}'")
-    _scheduled_off_times.pop(device_name, None)
+# ---------------------------------------------------------------------------
+# Scheduled shutdown
+# ---------------------------------------------------------------------------
+def _arm_timer(device_name: str, at: float) -> None:
+    entry = _schedules[device_name]
 
-
-def schedule_device_off(device_name: str, device: dict, hours: int) -> None:
-    """Schedule a shutdown for a device after the given number of hours."""
-    _cancel_timer(device_name)
-
-    def turn_off():
+    def fire():
+        device = cfg.get_device_by_name(cfg.load_config(), device_name)
+        if not device or _schedules.get(device_name) is not entry:
+            return
+        entry["firing"] = True
         system_logger.info(f"Executing scheduled shutdown for '{device_name}'")
-        devices.shutdown_device(device)
-        off_timers.pop(device_name, None)
-        _scheduled_off_times.pop(device_name, None)
+        if ops.start_shutdown(device, source="schedule") is None:
+            entry["firing"] = False
+            _schedules.pop(device_name, None)
 
-    seconds = hours * 3600
-    timer = threading.Timer(seconds, turn_off)
+    timer = threading.Timer(max(0.0, at - time.time()), fire)
     timer.daemon = True
+    entry.update(at=at, timer=timer)
     timer.start()
 
-    scheduled_time = datetime.datetime.now() + datetime.timedelta(hours=hours)
-    time_str = scheduled_time.strftime("%Y-%m-%d %H:%M:%S")
-    off_timers[device_name] = timer
-    _scheduled_off_times[device_name] = time_str
 
-    system_logger.info(f"Scheduled shutdown for '{device_name}' in {hours}h ({time_str})")
-    logging_utils.log_activity(
-        "schedule", "success", f"{device_name} - shutdown in {hours}h"
+def schedule_device_off(device_name: str, hours: float, client_ip: str = "") -> float:
+    """Schedule a shutdown after the given number of hours. Returns the epoch time."""
+    _cancel_schedule(device_name, quiet=True)
+    at = time.time() + hours * 3600
+    _schedules[device_name] = {"retries": 0, "firing": False}
+    _arm_timer(device_name, at)
+
+    when = datetime.datetime.fromtimestamp(at).strftime("%H:%M")
+    system_logger.info(f"Scheduled shutdown for '{device_name}' in {hours}h ({when})")
+    logging_utils.log_event(
+        "schedule", "success", f"{device_name} will shut down at {when}",
+        device=device_name, ip=client_ip,
     )
+    return at
+
+
+def _cancel_schedule(device_name: str, quiet: bool = False, client_ip: str = "") -> bool:
+    entry = _schedules.pop(device_name, None)
+    if not entry:
+        return False
+    if entry.get("timer"):
+        entry["timer"].cancel()
+    system_logger.info(f"Cancelled scheduled shutdown for '{device_name}'")
+    if not quiet:
+        logging_utils.log_event(
+            "schedule", "cancelled", f"Scheduled shutdown of {device_name} cancelled",
+            device=device_name, ip=client_ip,
+        )
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -275,52 +281,45 @@ def api_plex_streams():
 # ---------------------------------------------------------------------------
 # Routes — Logs
 # ---------------------------------------------------------------------------
+def _int_arg(name: str, default: int, lo: int = 1, hi: int = 500) -> int:
+    try:
+        return max(lo, min(hi, int(request.args.get(name, default))))
+    except ValueError:
+        return default
+
+
+@app.route("/api/events", methods=["GET"])
+def api_events():
+    """Newest-first events. Filters: category=all|power|problems, device, before=<ts>."""
+    before = request.args.get("before")
+    try:
+        before = float(before) if before else None
+    except ValueError:
+        before = None
+    return jsonify(logging_utils.read_events(
+        limit=_int_arg("limit", 40),
+        before=before,
+        category=request.args.get("category", "all"),
+        device=request.args.get("device", ""),
+    ))
+
+
 @app.route("/api/logs", methods=["GET"])
 def api_logs():
-    log_type = request.args.get("type", "activity")
-    limit = int(request.args.get("limit", 100))
+    """Logs: type=events (default, alias activity) or type=system."""
+    log_type = request.args.get("type", "events")
+    limit = _int_arg("limit", 100)
 
-    if log_type == "activity":
-        log_file = os.path.join(logging_utils.LOG_DIR, "activity.csv")
-        if not os.path.exists(log_file):
-            return jsonify([])
+    if log_type in ("events", "activity"):
+        return jsonify(logging_utils.read_events(limit=limit)["events"])
 
-        try:
-            with open(log_file, "r") as f:
-                reader = csv.reader(f)
-                headers = next(reader)
-                all_rows = list(reader)
-                rows = all_rows[-limit:] if len(all_rows) > limit else all_rows
-
-                logs = []
-                for row in rows:
-                    if len(row) >= 4:
-                        logs.append(
-                            {
-                                "timestamp": row[0],
-                                "action": row[1],
-                                "result": row[2],
-                                "details": row[3],
-                            }
-                        )
-                return jsonify(logs)
-        except Exception as e:
-            system_logger.error(f"Error reading activity logs: {e}")
-            return jsonify({"error": str(e)}), 500
-
-    elif log_type == "system":
-        log_file = os.path.join(logging_utils.LOG_DIR, "system.log")
-        if not os.path.exists(log_file):
-            return jsonify([])
-
-        try:
-            with open(log_file, "r") as f:
-                lines = f.readlines()
-                lines = lines[-limit:] if len(lines) > limit else lines
-                return jsonify(lines)
-        except Exception as e:
-            system_logger.error(f"Error reading system logs: {e}")
-            return jsonify({"error": str(e)}), 500
+    if log_type == "system":
+        return jsonify(logging_utils.read_system_log(
+            limit=limit,
+            level=request.args.get("level", ""),
+            query=request.args.get("q", ""),
+            skip=_int_arg("skip", 0, lo=0, hi=100000),
+        ))
 
     return jsonify({"error": "Invalid log type"}), 400
 
@@ -392,7 +391,7 @@ def api_settings_save():
         config["settings_password"] = data["settings_password"]
 
     cfg.save_config(config)
-    logging_utils.log_activity("settings", "success", "Settings updated via form")
+    logging_utils.log_event("settings", "success", "Settings saved", ip=request.remote_addr or "")
     return jsonify({"success": True})
 
 
@@ -417,7 +416,8 @@ def api_settings_yaml_save():
     success, error = cfg.save_config_raw(raw_yaml)
 
     if success:
-        logging_utils.log_activity("settings", "success", "Settings updated via YAML")
+        logging_utils.log_event("settings", "success", "Settings saved (YAML editor)",
+                                ip=request.remote_addr or "")
         return jsonify({"success": True})
     else:
         return jsonify({"success": False, "message": error}), 400
@@ -426,8 +426,12 @@ def api_settings_yaml_save():
 # ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
+migrated = logging_utils.migrate_activity_csv()
+if migrated:
+    system_logger.info(f"Migrated {migrated} rows from activity.csv to events.jsonl")
 system_logger.info("Application starting up")
-logging_utils.log_activity("startup", "success", "Application initialized")
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=6464, debug=False)
+    logging_utils.log_event("app", "success", "Power manager started")
+    monitor.start()
+    app.run(host="0.0.0.0", port=6464, debug=False, threaded=True)

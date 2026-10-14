@@ -101,80 +101,93 @@ def wake_device(device: dict) -> bool:
     return False
 
 
+def _ssh_command(device: dict, command: str) -> list[str]:
+    """Build the ssh argv for running `command` on a device."""
+    ssh_cmd = [
+        "ssh",
+        "-i", device.get("ssh_key_path", "").strip(),
+        "-p", str(device.get("ssh_port", 22)),
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ConnectTimeout=5",
+        "-o", "BatchMode=yes",
+    ]
+    if os.name != "nt":
+        # Reuse one connection for the progress polls that follow a shutdown:
+        # a fresh ssh handshake costs the Pi 2 about a second of CPU.
+        ssh_cmd += [
+            "-o", "ControlMaster=auto",
+            "-o", "ControlPath=/tmp/hpm-ssh-%C",
+            "-o", "ControlPersist=60",
+        ]
+
+    # Add passphrase via sshpass if needed (sshpass must be installed)
+    passphrase = device.get("ssh_key_passphrase", "")
+    if passphrase:
+        ssh_cmd = ["sshpass", "-p", passphrase, *ssh_cmd]
+
+    ssh_cmd.append(f"{device.get('ssh_username', '')}@{device.get('ip', '')}")
+    ssh_cmd.append(command)
+    return ssh_cmd
+
+
+def run_ssh(device: dict, command: str, timeout: float = 10) -> tuple[int, str, str]:
+    """
+    Run a command on a device over ssh. Returns (exit code, stdout, stderr).
+    Exit code is -1 for a timeout and -2 when ssh could not be started at all.
+    """
+    ip = device.get("ip", "")
+    username = device.get("ssh_username", "")
+    key_path = device.get("ssh_key_path", "").strip()
+    name = device.get("name", "unknown")
+
+    if not ip or not key_path or not username:
+        return -2, "", f"missing IP, key path, or username for {name}"
+    if not os.path.isfile(key_path):
+        return -2, "", f"SSH key not found at {key_path}"
+
+    try:
+        result = subprocess.run(
+            _ssh_command(device, command),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            text=True,
+        )
+        return result.returncode, result.stdout, result.stderr
+    except subprocess.TimeoutExpired:
+        return -1, "", "timed out"
+    except FileNotFoundError:
+        return -2, "", "ssh command not found on this system"
+    except Exception as e:
+        return -2, "", str(e)
+
+
 def shutdown_device(device: dict) -> bool:
     """
     Shut down a device via the system `ssh` command.
     Returns True on success, False on failure.
     """
-    ip = device.get("ip", "")
-    port = device.get("ssh_port", 22)
-    username = device.get("ssh_username", "")
-    key_path = device.get("ssh_key_path", "").strip()
-    passphrase = device.get("ssh_key_passphrase", "")
-    command = device.get("shutdown_command", "suspend-now").strip()
     name = device.get("name", "unknown")
+    command = device.get("shutdown_command", "suspend-now").strip() or "suspend-now"
 
-    if not ip or not key_path or not username:
+    if not device.get("ip") or not device.get("ssh_key_path", "").strip() or not device.get("ssh_username"):
         logger.error(f"SSH shutdown: missing IP, key path, or username for {name}.")
         return False
 
-    if not command:
-        command = "suspend-now"
+    logger.info(f"Running shutdown command on {name}: {command}")
+    rc, out, err = run_ssh({**device, "shutdown_command": command}, command)
 
-    if not os.path.isfile(key_path):
-        logger.error(f"SSH key not found at {key_path}")
-        return False
-
-    # Build the ssh command
-    ssh_cmd = [
-        "ssh",
-        "-i", key_path,
-        "-p", str(port),
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "ConnectTimeout=5",
-        "-o", "BatchMode=yes",
-    ]
-
-    # Add passphrase via sshpass if needed (sshpass must be installed)
-    if passphrase:
-        ssh_cmd = [
-            "sshpass", "-p", passphrase,
-            *ssh_cmd,
-        ]
-
-    ssh_cmd.append(f"{username}@{ip}")
-    ssh_cmd.append(command)
-
-    logger.info(f"Running: {' '.join(ssh_cmd)}")
-
-    try:
-        result = subprocess.run(
-            ssh_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=10,
-            text=True,
-        )
-
-        if result.returncode != 0:
-            err = result.stderr.strip() or "no output"
-            logger.error(f"SSH shutdown failed for {name}: exit={result.returncode}, stderr={err}")
-            return False
-
-        out = result.stdout.strip()
-        logger.info(f"SSH shutdown succeeded for {name}" + (f" ({out})" if out else ""))
+    if rc == -1:
+        # Timeout can be normal - the target might suspend before replying
+        logger.info(f"SSH to {name} timed out (likely suspended - OK)")
         return True
+    if rc != 0:
+        logger.error(f"SSH shutdown failed for {name}: exit={rc}, stderr={err.strip() or 'no output'}")
+        return False
 
-    except subprocess.TimeoutExpired:
-        # Timeout can be normal — the target might suspend before replying
-        logger.info(f"SSH to {name} timed out (likely suspended — OK)")
-        return True
-    except FileNotFoundError:
-        logger.error("ssh command not found on this system")
-        return False
-    except Exception as e:
-        logger.error(f"SSH shutdown error for {name}: {e}")
-        return False
+    out = out.strip()
+    logger.info(f"SSH shutdown succeeded for {name}" + (f" ({out})" if out else ""))
+    return True
 
 
 def check_restricted_hours(restricted_cfg: dict, now: datetime.datetime | None = None) -> bool:

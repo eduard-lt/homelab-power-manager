@@ -3,6 +3,8 @@ Tests for app.py — Flask routes.
 """
 
 import json
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -58,8 +60,24 @@ def mock_load_config(monkeypatch):
     monkeypatch.setattr("app.cfg.save_config", lambda x: None)
     monkeypatch.setattr("app.cfg.load_config_raw", lambda: "settings_password: admin\ndevices: []\n")
     monkeypatch.setattr("app.cfg.save_config_raw", lambda yaml_str: (True, ""))
-    monkeypatch.setattr("app.logging_utils.log_activity", lambda *a, **kw: None)
+    monkeypatch.setattr("app.logging_utils.log_event", lambda *a, **kw: None)
+    monkeypatch.setattr("app.devices.ping", lambda ip, timeout=1.0: False)
+    monkeypatch.setattr("operations.time.sleep", lambda s: None)
+    flask_app.ops._ops.clear()
+    for name in list(flask_app._schedules):
+        flask_app._cancel_schedule(name, quiet=True)
     return test_config
+
+
+def wait_for_op(name):
+    """Wait until the device's operation leaves the running state."""
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        op = flask_app.ops.current(name)
+        if op and op["state"] != "running":
+            return op
+        threading.Event().wait(0.01)
+    raise AssertionError(f"operation for {name} did not finish")
 
 
 class TestRoutes:
@@ -106,6 +124,10 @@ class TestStatusAPI:
         data = resp.get_json()
         assert "devices" in data
         assert "restricted_hours" in data
+        server = data["devices"][0]
+        assert server["online"] is False
+        assert server["op"] is None
+        assert server["scheduled"] is None
 
 
 class TestControlAPI:
@@ -116,12 +138,9 @@ class TestControlAPI:
         )
         assert resp.status_code == 404
 
-    @patch("app.devices.ping")
-    @patch("app.devices.wake_device")
-    def test_turn_on_success(self, mock_wake, mock_ping, client, mock_load_config):
-        mock_wake.return_value = True
-        mock_ping.return_value = False
-
+    @patch("app.devices.check_restricted_hours", return_value=False)
+    @patch("operations.devices.send_wol")
+    def test_turn_on_success(self, mock_wol, mock_restricted, client, mock_load_config, monkeypatch):
         resp = client.post(
             "/api/control",
             json={"action": "turn_on", "device": "TestServer"},
@@ -129,9 +148,21 @@ class TestControlAPI:
         assert resp.status_code == 200
         assert resp.get_json()["success"] is True
 
-    @patch("app.devices.shutdown_device")
-    def test_turn_off_success(self, mock_shutdown, client, mock_load_config):
-        mock_shutdown.return_value = True
+        monkeypatch.setattr("operations.devices.ping", lambda ip, timeout=1.0: True)
+        op = wait_for_op("TestServer")
+        assert op["state"] == "success"
+        assert mock_wol.called
+        assert "online" in op["steps"][-1]["msg"]
+
+    @patch("app.devices.check_restricted_hours", return_value=True)
+    def test_turn_on_denied_in_quiet_hours(self, mock_restricted, client, mock_load_config):
+        resp = client.post("/api/control", json={"action": "turn_on", "device": "TestServer"})
+        data = resp.get_json()
+        assert data["success"] is False
+        assert "02:00" in data["message"]
+
+    def test_turn_off_success(self, client, mock_load_config, monkeypatch):
+        monkeypatch.setattr("operations.devices.run_ssh", lambda d, c, timeout=10: (0, "ok", ""))
 
         resp = client.post(
             "/api/control",
@@ -139,6 +170,21 @@ class TestControlAPI:
         )
         assert resp.status_code == 200
         assert resp.get_json()["success"] is True
+        op = wait_for_op("TestServer")
+        assert op["state"] == "success"
+
+    def test_turn_off_blocked_then_dismissed(self, client, mock_load_config, monkeypatch):
+        monkeypatch.setattr(
+            "operations.devices.run_ssh",
+            lambda d, c, timeout=10: (3, "goodnight: Plex: bob is watching X\n", ""),
+        )
+        client.post("/api/control", json={"action": "turn_off", "device": "TestServer"})
+        op = wait_for_op("TestServer")
+        assert op["state"] == "blocked"
+        assert any("bob is watching" in s["msg"] for s in op["steps"])
+
+        client.post("/api/control", json={"action": "dismiss", "device": "TestServer"})
+        assert flask_app.ops.current("TestServer") is None
 
     def test_turn_off_no_ssh(self, client, mock_load_config):
         """Turning off a device without SSH should fail."""
@@ -148,16 +194,27 @@ class TestControlAPI:
         )
         assert resp.status_code == 400
 
-    @patch("app.devices.shutdown_device")
-    def test_schedule_off(self, mock_shutdown, client, mock_load_config):
-        mock_shutdown.return_value = True
-
+    def test_schedule_off_and_cancel(self, client, mock_load_config):
         resp = client.post(
             "/api/control",
             json={"action": "schedule_off", "device": "TestServer", "hours": 2},
         )
         assert resp.status_code == 200
         assert resp.get_json()["success"] is True
+
+        status = client.get("/api/status").get_json()
+        assert status["devices"][0]["scheduled"]["at"] > status["now"]
+
+        resp = client.post("/api/control", json={"action": "cancel_schedule", "device": "TestServer"})
+        assert resp.get_json()["success"] is True
+        assert client.get("/api/status").get_json()["devices"][0]["scheduled"] is None
+
+    def test_schedule_rejects_bad_delay(self, client, mock_load_config):
+        resp = client.post(
+            "/api/control",
+            json={"action": "schedule_off", "device": "TestServer", "hours": "abc"},
+        )
+        assert resp.status_code == 400
 
 
 class TestSettingsAPI:
@@ -249,6 +306,18 @@ class TestSettingsYamlAPI:
 
 
 class TestLogsAPI:
+    def test_events_endpoint(self, client):
+        resp = client.get("/api/events?category=power")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data["events"], list)
+        assert "has_more" in data
+
+    def test_system_log_endpoint(self, client):
+        resp = client.get("/api/logs?type=system&limit=5")
+        assert resp.status_code == 200
+        assert isinstance(resp.get_json()["lines"], list)
+
     def test_activity_logs_returns_list(self, client):
         """Activity logs endpoint returns a list (may contain startup entries)."""
         resp = client.get("/api/logs?type=activity")

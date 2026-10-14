@@ -1,13 +1,16 @@
 [Unit]
 Description=Homelab Power Manager
-After=network-online.target
 Wants=network-online.target
+After=network-online.target
+# Never give up restarting (e.g. after a power cut, when the network comes up late)
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=pi
-WorkingDirectory=/home/pi/HomelabPowerMangeger
-ExecStart=/home/pi/HomelabPowerMangeger/.venv/bin/python /home/pi/HomelabPowerMangeger/app.py
+WorkingDirectory=/home/pi/homelab-power-manager
+ExecStart=/home/pi/homelab-power-manager/.venv/bin/python /home/pi/homelab-power-manager/app.py
+Environment=PYTHONUNBUFFERED=1
 Restart=always
 RestartSec=5
 

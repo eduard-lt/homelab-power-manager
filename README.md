@@ -14,17 +14,30 @@ iPhone/Android **PWA** from your home screen.
 - **Multi-device support** — add as many devices as you want (servers, PCs, etc.)
 - **Wake-on-LAN** — sends a magic packet to power on any WoL-capable device
 - **SSH shutdown** — suspends/shuts down a device over SSH using your private key
+- **Live shutdown timeline** — the dashboard shows each step as it happens
+  (activity check, Minecraft save, disk sync, power off) and confirms when the
+  device is actually off; wake-ups show progress until the device answers
+- **Smart goodnight** — with the included [`server/goodnight`](server/goodnight)
+  script the server refuses to shut down while someone plays Valheim or watches
+  Plex, and tells you who; "Shut down anyway" (or running `goodnight` twice in
+  10 minutes) overrides it and stops Plex streams with a goodnight message
 - **Custom shutdown command** — per device (e.g. `suspend-now`, `poweroff`, `shutdown -h now`)
 - **Auto-hiding buttons** — if no SSH key is configured for a device, the shutdown
   button is hidden automatically
-- **Scheduled shutdown** — pick a delay (1–12h) and the device shuts down automatically
+- **Scheduled shutdown** — pick a delay (30 min–12h); if the server is in use when
+  it fires, it tries again every 30 minutes (up to 3 hours)
 - **Plex stream monitor** — shows active Plex streams per device via
   [Tautulli](https://tautulli.com/) (per-device configuration)
 - **Restricted hours** — prevents wake-ups during a configurable time window
   (e.g. 2 AM – 7 AM)
 - **Password-protected settings** — add/edit/delete devices, change restricted hours,
   change settings password — all from the web UI
-- **Activity & system logs** — logged to CSV / rotating log files
+- **Activity log** — wake/shutdown/schedule events, the server going on/offline
+  by itself, with the full step timeline of each operation; filter by Power /
+  Problems, grouped by day. Plus a searchable system log
+- **Light on a Raspberry Pi 2** — device pings and Plex checks run on one
+  background thread (fast only while the dashboard is open), config is cached,
+  logs are read from the end of the file
 - **Dark / light theme** — persisted per-browser via localStorage
 - **PWA-ready** — add to your home screen for a native-app feel
 
@@ -69,7 +82,7 @@ uv sync
 uv run python app.py
 ```
 
-The server starts on **port 5555**. Open `http://<pi-ip>:5555` in any browser.
+The server starts on **port 6464**. Open `http://<pi-ip>:5555` in any browser.
 
 On first run, a `config.json` file is created with sensible defaults. If you
 had a previous version installed, your old config will be migrated automatically.
@@ -209,7 +222,8 @@ Each device has these fields:
 | **SSH Port** | No | SSH port (default: 22) |
 | **SSH Username** | No | SSH username on the target device |
 | **SSH Key Passphrase** | No | Passphrase for the SSH key (if any) |
-| **Shutdown Command** | No | Command to suspend/shutdown (default: `suspend-now`). Use the command you set up in the sudoers file, e.g. `sudo systemctl suspend`. See [SSH Key Setup](#ssh-key-setup-required-for-shutdown) above. |
+| **Shutdown Command** | No | Command to suspend/shutdown (default: `suspend-now`). Use the command you set up in the sudoers file, e.g. `sudo systemctl suspend`, or `goodnight`. Exit code `3` means "busy, not shutting down". See [SSH Key Setup](#ssh-key-setup-required-for-shutdown) above. |
+| **Progress Command** | No | Prints shutdown progress for the live timeline, e.g. `goodnight --progress`. Output: `state<TAB>running\|idle`, then `epoch<TAB>level<TAB>message` lines. |
 | **Tautulli IP** | No | IP of your Tautulli server |
 | **Tautulli Port** | No | Tautulli port (default: 7979) |
 | **Tautulli API Key** | No | Your Tautulli API key |
@@ -227,6 +241,31 @@ sudo visudo -f /etc/sudoers.d/suspend-nopasswd
 # Then in the app Settings, set Shutdown Command to:
 sudo systemctl suspend
 ```
+
+---
+
+## Smart goodnight (server side)
+
+[`server/goodnight`](server/goodnight) is the shutdown script for the homelab
+server itself. Install it on the server:
+
+```bash
+sudo install -m 755 server/goodnight /usr/local/bin/goodnight
+```
+
+| Command | What it does |
+|---|---|
+| `goodnight` | Checks Valheim players + Plex streams. Quiet → shuts down in the background. Busy → says who is active and exits `3` |
+| `goodnight` again within 10 min | Ignores the activity; Plex viewers get a "see you tomorrow" message on screen, then 60s later the shutdown starts |
+| `goodnight --check` | Only report activity |
+| `goodnight --dry-run` | Check and show the steps, change nothing |
+| `goodnight --status` | Is it running + last steps |
+| `goodnight --progress` | Machine-readable progress (for the app's Progress Command) |
+
+The Valheim check uses the image's own `valheim-is-idle`; if the Valheim
+container is stopped or deleted the check is simply skipped. The Plex check
+reads the Tautulli API key from the Tautulli container at run time. Stopping a
+stream with a message needs Plex Pass.
 
 ---
 
@@ -302,14 +341,19 @@ uv run pytest -v
 HomelabPowerMangeger/
 ├── app.py                      # Flask app — routes, API, scheduling
 ├── config.py                   # Configuration management & migration
-├── devices.py                  # Device operations (ping, WoL, SSH shutdown)
+├── devices.py                  # Device operations (ping, WoL, SSH)
+├── monitor.py                  # Background pinger + Plex poller (status snapshot)
+├── operations.py               # Wake / shutdown runs with live step timelines
 ├── plex.py                     # Plex/Tautulli stream monitoring (cached)
-├── logging_utils.py            # System & activity logging setup
+├── logging_utils.py            # System log + events.jsonl (read newest-first)
 ├── config.json                 # Runtime config (auto-created, gitignored)
 ├── device-controller.service   # Systemd unit file
 ├── manifest.json               # PWA manifest
 ├── pyproject.toml              # Project metadata & deps (uv)
+├── server/
+│   └── goodnight               # Smart shutdown script for the server
 ├── static/
+│   ├── app.css                 # Shared styles (mobile first, dark/light)
 │   └── power-on-*.png          # PWA icons
 ├── templates/
 │   ├── index.html              # Main dashboard (dynamic device tabs)
@@ -320,7 +364,7 @@ HomelabPowerMangeger/
 │   ├── test_plex.py            # Plex monitor unit tests
 │   └── test_app.py             # Flask route integration tests
 └── logs/                       # Created at runtime (gitignored)
-    ├── activity.csv            # User action log
+    ├── events.jsonl            # Activity log (one JSON event per line)
     └── system.log              # Rotating system/error log
 ```
 

@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+# goodnight - graceful shutdown of the homelab, as one command.
+#
+#   goodnight               check for activity (Valheim players, Plex streams).
+#                           Quiet -> start the shutdown in the background and return.
+#                           Busy  -> report who is active and exit 3. Running goodnight
+#                                    again within 10 minutes ignores the activity.
+#   goodnight --force       skip the activity check (same as the "double goodnight")
+#   goodnight --check       only report activity (exit 0 = quiet, 3 = busy)
+#   goodnight --foreground  run the steps in this terminal and watch them (no check)
+#   goodnight --dry-run     check + show what it would do, change nothing
+#   goodnight --status      is a goodnight running? + last progress lines
+#   goodnight --progress    machine-readable progress (used by the Pi power manager)
+#
+# Steps: [stop Plex streams with a message + 60s grace] 1) stop Minecraft cleanly
+#        2) sync disks  3) systemctl poweroff
+# Progress goes to the journal (journalctl -t goodnight -f) and to $PROGRESS.
+#
+# Why only Minecraft is stopped by hand:
+#   * crafty-container has restart policy "always", so it comes back on the next boot
+#     (and Crafty auto-starts Better MC ~10s later).
+#   * Everything else is "unless-stopped": a manual `docker stop` would leave it OFF after
+#     boot, so those are left for Docker's own shutdown (Valheim has a 120s stop timeout).
+#   * Crafty's default 10s stop timeout is tight for a 12G JVM saving its world, hence
+#     the explicit `minecraft stop` (waits up to 180s).
+#
+# Activity checks:
+#   * Valheim: the server is private, so the Steam query port does not answer; the image's
+#     own `valheim-is-idle` (network-traffic based) is used. A missing or stopped
+#     container is skipped, so deleting Valheim later needs no change here.
+#   * Plex: Tautulli get_activity. The API key is read from the Tautulli container at run
+#     time, so it is never stored in this script.
+#
+# `sync` can take minutes when the 8TB disk is busy (downloads, SMART tests) - that is why
+# the default mode detaches instead of holding the ssh session open.
+# Never use poweroff -f / --force here: it skips the orderly stop and unmounts.
+set -u
+LOCK=/tmp/goodnight.lock
+PROGRESS=/tmp/goodnight.progress     # "epoch<TAB>level<TAB>message" per line
+BLOCKED=/tmp/goodnight.blocked       # epoch of the last run that was stopped by activity
+OVERRIDE_WINDOW=600                  # a second goodnight within 10 min ignores activity
+PLEX_GRACE=60                        # seconds between stopping streams and powering off
+PLEX_MESSAGE="The server is going to sleep for the night. See you tomorrow!"
+VALHEIM_CONTAINER=valheim
+TAUTULLI_CONTAINER=tautulli
+TAUTULLI_URL=http://127.0.0.1:8181
+
+mode=background
+force=false
+kick_plex=false
+child=false
+case "${1:-}" in
+  "")           ;;
+  --force)      force=true ;;
+  --check)      mode=check ;;
+  --foreground) mode=foreground ;;
+  --dry-run)    mode=dry ;;
+  --status)     mode=status ;;
+  --progress)   mode=progress ;;
+  --run)        mode=foreground; child=true; [ "${2:-}" = --kick-plex ] && kick_plex=true ;;  # internal
+  *) echo "usage: goodnight [--force|--check|--foreground|--dry-run|--status|--progress]" >&2; exit 2 ;;
+esac
+
+# say LEVEL MESSAGE - print, journal, and append to the progress file.
+# Levels: info step ok busy warn error done, hint (terminal-only advice, hidden in the app)
+say() {
+  local level=$1; shift
+  echo "goodnight: $*"
+  logger -t goodnight -- "$*"
+  printf '%s\t%s\t%s\n' "$(date +%s)" "$level" "$*" >> "$PROGRESS" 2>/dev/null
+}
+run() { if [ "$mode" = dry ]; then echo "  [dry-run] $*"; else "$@"; fi; }
+is_running() { ! flock -n "$LOCK" true 2>/dev/null; }
+
+if [ "$mode" = status ]; then
+  if is_running; then echo "goodnight: RUNNING"; else echo "goodnight: not running"; fi
+  [ -f "$PROGRESS" ] && tail -n 8 "$PROGRESS" | while IFS=$'\t' read -r t lvl msg; do
+    echo "  $(date -d "@$t" +%H:%M:%S) [$lvl] $msg"; done
+  exit 0
+fi
+
+if [ "$mode" = progress ]; then
+  if is_running; then echo "state	running"; else echo "state	idle"; fi
+  [ -f "$PROGRESS" ] && cat "$PROGRESS"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Activity checks
+# ---------------------------------------------------------------------------
+tautulli_key() {
+  docker exec "$TAUTULLI_CONTAINER" awk -F' *= *' '/^api_key *=/ {print $2; exit}' /config/config.ini 2>/dev/null
+}
+
+# plex_py list|kill - list prints "user<TAB>title<TAB>state" per stream; kill stops them.
+plex_py() {
+  TAUTULLI_KEY=$1 TAUTULLI_URL=$TAUTULLI_URL PLEX_MESSAGE=$PLEX_MESSAGE python3 - "$2" <<'PY'
+import json, os, sys, urllib.parse, urllib.request
+base = os.environ["TAUTULLI_URL"] + "/api/v2?apikey=" + urllib.parse.quote(os.environ["TAUTULLI_KEY"])
+def call(cmd, **kw):
+    q = "".join("&%s=%s" % (k, urllib.parse.quote(str(v))) for k, v in kw.items())
+    with urllib.request.urlopen(base + "&cmd=" + cmd + q, timeout=8) as r:
+        resp = json.load(r)["response"]
+    if resp.get("result") != "success":
+        raise SystemExit("tautulli %s: %s" % (cmd, resp.get("message")))
+    return resp.get("data") or {}
+sessions = call("get_activity").get("sessions", [])
+for s in sessions:
+    title = s.get("full_title") or s.get("title") or "?"
+    if sys.argv[1] == "kill":
+        call("terminate_session", session_id=s.get("session_id", ""), message=os.environ["PLEX_MESSAGE"])
+    print("%s\t%s\t%s" % (s.get("friendly_name") or s.get("user") or "someone", title, s.get("state") or "playing"))
+PY
+}
+
+busy=0
+check_valheim() {
+  local state
+  state=$(docker inspect -f '{{.State.Running}}' "$VALHEIM_CONTAINER" 2>/dev/null)
+  if [ -z "$state" ]; then
+    say info "Valheim: not installed - skipped"
+  elif [ "$state" != true ]; then
+    say info "Valheim: server stopped - skipped"
+  elif docker exec "$VALHEIM_CONTAINER" valheim-is-idle >/dev/null 2>&1; then
+    say ok "Valheim: no players online"
+  else
+    local n
+    n=$(docker logs --since 15m "$VALHEIM_CONTAINER" 2>&1 | grep -o 'Connections [0-9]*' | tail -n 1 | grep -o '[0-9]*$')
+    if [ -n "$n" ] && [ "$n" -gt 0 ]; then
+      say busy "Valheim: $n player(s) online"
+    else
+      say busy "Valheim: players are online"
+    fi
+    busy=1
+  fi
+}
+
+PLEX_STREAMS=""
+check_plex() {
+  if [ "$(docker inspect -f '{{.State.Running}}' "$TAUTULLI_CONTAINER" 2>/dev/null)" != true ]; then
+    say warn "Plex: Tautulli is not running - cannot check streams"; return
+  fi
+  local key out
+  key=$(tautulli_key)
+  if [ -z "$key" ]; then say warn "Plex: could not read the Tautulli API key - skipped"; return; fi
+  if ! out=$(plex_py "$key" list 2>&1); then say warn "Plex: check failed ($out)"; return; fi
+  if [ -z "$out" ]; then
+    say ok "Plex: nothing playing"
+  else
+    PLEX_STREAMS=$out
+    busy=1
+    while IFS=$'\t' read -r user title state; do
+      say busy "Plex: $user is watching $title ($state)"
+    done <<< "$out"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Entry: decide whether to shut down
+# ---------------------------------------------------------------------------
+if [ "$mode" = background ] || [ "$mode" = check ] || [ "$mode" = dry ]; then
+  if [ "$mode" != dry ] && is_running; then
+    echo "goodnight: already running - nothing to do (watch: goodnight --status)"; exit 0
+  fi
+  # only a real run owns the progress file; --check / --dry-run must not disturb it
+  if [ "$mode" = background ]; then : > "$PROGRESS"; else PROGRESS=/dev/null; fi
+  [ "$mode" = dry ] && tag=" (dry run)" || tag=""
+
+  if [ "$force" = true ]; then
+    say warn "forced - skipping the activity check$tag"
+    check_plex   # still needed: forced runs warn Plex viewers before stopping them
+  else
+    say step "checking for activity$tag"
+    check_valheim
+    check_plex
+    if [ "$mode" = check ]; then [ $busy = 1 ] && exit 3 || exit 0; fi
+
+    if [ $busy = 1 ]; then
+      now=$(date +%s); last=$(cat "$BLOCKED" 2>/dev/null || echo 0)
+      if [ $((now - last)) -le $OVERRIDE_WINDOW ] && [ "$mode" != dry ]; then
+        say warn "second goodnight within $((OVERRIDE_WINDOW / 60)) min - ignoring the activity"
+      else
+        [ "$mode" = dry ] || echo "$now" > "$BLOCKED"
+        say hint "not shutting down - run goodnight again within $((OVERRIDE_WINDOW / 60)) min to force it"
+        exit 3
+      fi
+    else
+      say ok "all quiet"
+    fi
+  fi
+  rm -f "$BLOCKED"
+  [ -n "$PLEX_STREAMS" ] && kick_plex=true
+
+  if [ "$mode" = dry ]; then
+    [ "$kick_plex" = true ] && echo "  [dry-run] stop Plex streams with: \"$PLEX_MESSAGE\", wait ${PLEX_GRACE}s"
+    echo "  [dry-run] minecraft stop"; echo "  [dry-run] sync"; echo "  [dry-run] sudo -n /usr/bin/systemctl poweroff"
+    exit 0
+  fi
+
+  # Detach. setsid + nohup survive the ssh session being closed; the child re-enters
+  # this script in foreground mode.
+  args=(--run); [ "$kick_plex" = true ] && args+=(--kick-plex)
+  setsid nohup "$0" "${args[@]}" >/dev/null 2>&1 < /dev/null &
+  say info "shutdown started in the background; the server will power off in a few minutes"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# foreground from here. Take the lock so two runs can never overlap.
+# ---------------------------------------------------------------------------
+exec 9>"$LOCK"
+flock -n 9 || { echo "goodnight: already running" >&2; exit 0; }
+[ "$child" = true ] || : > "$PROGRESS"
+
+total=3; n=0
+[ "$kick_plex" = true ] && total=4
+step() { n=$((n + 1)); say step "$n/$total $*"; }
+
+if [ "$kick_plex" = true ]; then
+  step "stopping Plex streams with a goodnight message, then waiting ${PLEX_GRACE}s"
+  key=$(tautulli_key)
+  if out=$(plex_py "$key" kill 2>&1); then
+    while IFS=$'\t' read -r user title state; do
+      [ -n "$user" ] && say info "stopped $user's stream ($title)"
+    done <<< "$out"
+    sleep "$PLEX_GRACE"
+  else
+    say warn "could not stop Plex streams ($out) - continuing"
+  fi
+fi
+
+step "stopping Minecraft (waits for the world save)"
+minecraft stop || { say error "minecraft stop FAILED - aborting, not powering off"; exit 1; }
+
+step "syncing disks (can take a few minutes if the 8TB disk is busy)"
+sync
+
+step "powering off - wake with WoL"
+say done "goodnight - powering off now"
+sudo -n /usr/bin/systemctl poweroff || { say error "poweroff FAILED (sudo rule?)"; exit 1; }
