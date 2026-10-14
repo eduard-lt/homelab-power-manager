@@ -139,6 +139,7 @@
     // ------------------------------------------------------------ dashboard
     const cards = {};          // device name -> { el, parts: {key: lastHtml} }
     let lastStatus = null;
+    let clockOffset = 0;     // server clock minus phone clock, in seconds
     let restricted = { active: false, start: 2, end: 7 };
 
     function setPart(card, key, html) {
@@ -208,6 +209,8 @@
             control(name, 'cancel_schedule').then(d => { if (d.success) toast('Scheduled shutdown cancelled'); });
         } else if (act === 'force') {
             control(name, 'turn_off', { force: true });
+        } else if (act === 'check') {
+            control(name, 'turn_off');
         } else if (act === 'dismiss') {
             control(name, 'dismiss');
         }
@@ -225,11 +228,27 @@
         }).join('')}</ol>`;
     }
 
+    // "Shut down anyway" lives as long as goodnight's override window (10 min)
+    function blockedActions(op, now) {
+        const left = (op.force_until || 0) - now;
+        if (left > 0) {
+            const m = Math.floor(left / 60), sec = Math.floor(left % 60);
+            return `<div class="op-actions">
+                <button class="btn ghost" data-act="dismiss">Keep it on</button>
+                <button class="btn danger" data-act="force">Shut down anyway</button></div>
+                <p class="hint">Offer open for ${m}:${pad(sec)} · Keep it on closes it</p>`;
+        }
+        return `<div class="op-actions">
+            <button class="btn ghost" data-act="dismiss">Dismiss</button>
+            <button class="btn sleep" data-act="check">Check again</button></div>
+            <p class="hint">The 10-minute window to force it has closed.</p>`;
+    }
+
     function renderDevice(dev) {
         const card = ensureCard(dev);
         const op = dev.op;
         const running = op && op.state === 'running';
-        const now = lastStatus ? lastStatus.now : Date.now() / 1000;
+        const now = Date.now() / 1000 + clockOffset;   // server time, ticking locally
 
         // Header + status pill
         let pill, sub;
@@ -291,9 +310,7 @@
             const pillCls = { running: 'busy', success: 'on', blocked: 'busy' }[op.state] || '';
             opHtml = `<div class="op"><div class="op-head"><strong>${esc(op.title)}</strong><span class="pill ${pillCls}">${esc(stateTxt)}</span></div>
                 ${timelineHtml(op.steps, running)}
-                ${op.state === 'blocked' ? `<div class="op-actions">
-                    <button class="btn ghost" data-act="dismiss">Keep it on</button>
-                    <button class="btn danger" data-act="force">Shut down anyway</button></div>` : ''}
+                ${op.state === 'blocked' ? blockedActions(op, now) : ''}
                 ${op.state === 'success' || op.state === 'failed' ? `<div class="op-actions"><button class="btn ghost sm" data-act="dismiss">Dismiss</button></div>` : ''}
             </div>`;
         }
@@ -302,6 +319,7 @@
 
     function renderStatus(data) {
         lastStatus = data;
+        clockOffset = data.now - Date.now() / 1000;
         restricted = data.restricted || restricted;
         const box = $('#devices');
         if (!data.devices.length) {
@@ -316,6 +334,12 @@
             if (cards[dev.name].el.parentNode !== box) box.appendChild(cards[dev.name].el);
         });
     }
+
+    // Tick the countdown every second while a shutdown is on hold
+    setInterval(() => {
+        if (document.hidden || !lastStatus) return;
+        lastStatus.devices.forEach(d => { if (d.op && d.op.state === 'blocked') renderDevice(d); });
+    }, 1000);
 
     // ------------------------------------------------------------ polling
     // Fast while something is happening, slow otherwise, paused in the background.

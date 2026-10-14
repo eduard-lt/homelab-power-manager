@@ -257,6 +257,8 @@ sudo install -m 755 server/goodnight /usr/local/bin/goodnight
 |---|---|
 | `goodnight` | Checks Valheim players + Plex streams. Quiet → shuts down in the background. Busy → says who is active and exits `3` |
 | `goodnight` again within 10 min | Ignores the activity; Plex viewers get a "see you tomorrow" message on screen, then 60s later the shutdown starts |
+| `goodnight --force` | Skip the check (what the app's "Shut down anyway" runs) |
+| `goodnight --cancel` | Close the 10-minute window (what the app's "Keep it on" runs) |
 | `goodnight --check` | Only report activity |
 | `goodnight --dry-run` | Check and show the steps, change nothing |
 | `goodnight --status` | Is it running + last steps |

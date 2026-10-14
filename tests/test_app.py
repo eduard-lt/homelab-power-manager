@@ -328,3 +328,40 @@ class TestLogsAPI:
     def test_invalid_log_type(self, client):
         resp = client.get("/api/logs?type=invalid")
         assert resp.status_code == 400
+
+
+class TestOverrideWindow:
+    """'Shut down anyway' / 'Keep it on' follow goodnight's 10-minute window."""
+
+    def _block(self, client, monkeypatch, calls):
+        def fake_ssh(device, command, timeout=10):
+            calls.append(command)
+            return (3, "", "") if command == "suspend-now" else (0, "", "")
+        monkeypatch.setattr("operations.devices.run_ssh", fake_ssh)
+        client.post("/api/control", json={"action": "turn_off", "device": "TestServer"})
+        assert wait_for_op("TestServer")["state"] == "blocked"
+
+    def test_force_inside_window(self, client, mock_load_config, monkeypatch):
+        calls = []
+        self._block(client, monkeypatch, calls)
+        client.post("/api/control", json={"action": "turn_off", "device": "TestServer", "force": True})
+        op = wait_for_op("TestServer")
+        assert calls[-1] == "suspend-now --force"
+        assert "(forced)" in op["title"]
+
+    def test_force_after_window_is_a_fresh_check(self, client, mock_load_config, monkeypatch):
+        calls = []
+        self._block(client, monkeypatch, calls)
+        flask_app.ops._ops["TestServer"]["force_until"] = 0  # window expired
+        client.post("/api/control", json={"action": "turn_off", "device": "TestServer", "force": True})
+        wait_for_op("TestServer")
+        assert calls[-1] == "suspend-now"
+
+    def test_keep_it_on_cancels_window(self, client, mock_load_config, monkeypatch):
+        calls = []
+        self._block(client, monkeypatch, calls)
+        client.post("/api/control", json={"action": "dismiss", "device": "TestServer"})
+        deadline = time.monotonic() + 3
+        while "suspend-now --cancel" not in calls and time.monotonic() < deadline:
+            threading.Event().wait(0.01)
+        assert "suspend-now --cancel" in calls

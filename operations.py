@@ -25,6 +25,7 @@ import logging_utils
 logger = logging.getLogger("homelab_pm")
 
 BLOCKED_EXIT_CODE = 3
+OVERRIDE_WINDOW = 600       # goodnight's window: "Shut down anyway" is offered this long
 WAKE_TIMEOUT = 180          # seconds to wait for a woken device to answer pings
 WAKE_RESEND_AT = (20, 60)   # resend the magic packet if still silent at these marks
 OFF_TIMEOUT = 15 * 60       # Plex grace + Minecraft save + sync can take a while
@@ -58,11 +59,19 @@ class Operations:
         with self._lock:
             return any(op["state"] == "running" for op in self._ops.values())
 
-    def dismiss(self, name: str) -> None:
+    def dismiss(self, name: str) -> dict | None:
+        """Forget a finished op. Returns it, so the caller can tell a 'keep it on'."""
         with self._lock:
             op = self._ops.get(name)
             if op and op["state"] != "running":
-                del self._ops[name]
+                return self._ops.pop(name)
+        return None
+
+    def force_allowed(self, name: str) -> bool:
+        """True while a blocked shutdown's override window is still open."""
+        with self._lock:
+            op = self._ops.get(name)
+            return bool(op and op["state"] == "blocked" and time.time() < op.get("force_until", 0))
 
     # -----------------------------------------------------------------------
     # Starters - return the new op, or None if one is already running
@@ -70,11 +79,22 @@ class Operations:
     def start_wake(self, device: dict, client_ip: str = "") -> dict | None:
         return self._start(device, "wake", f"Waking {device.get('name')}", self._run_wake, client_ip)
 
-    def start_shutdown(self, device: dict, client_ip: str = "", source: str = "manual") -> dict | None:
+    def start_shutdown(self, device: dict, client_ip: str = "", source: str = "manual",
+                       force: bool = False) -> dict | None:
         title = f"Shutting down {device.get('name')}"
         if source == "schedule":
             title = f"Scheduled shutdown of {device.get('name')}"
+        if force:
+            title += " (forced)"
+            device = {**device, "shutdown_command": _with_flag(device, "--force")}
         return self._start(device, "shutdown", title, self._run_shutdown, client_ip, source)
+
+    def cancel_override(self, device: dict) -> None:
+        """'Keep it on': close goodnight's override window on the server (in the background)."""
+        def run():
+            rc, out, err = devices.run_ssh(device, _with_flag(device, "--cancel"), timeout=15)
+            logger.info(f"Override cancel on {device.get('name')}: exit={rc} {(out or err).strip()}")
+        threading.Thread(target=run, name="cancel-override", daemon=True).start()
 
     def _start(self, device, kind, title, runner, client_ip, source="manual"):
         name = device.get("name", "")
@@ -204,6 +224,7 @@ class Operations:
         if rc == BLOCKED_EXIT_CODE:
             with self._lock:
                 op["can_force"] = True
+                op["force_until"] = time.time() + OVERRIDE_WINDOW
             return self._finish(device, op, "blocked", f"{name} is in use, so it stays on")
         if rc not in (0, -1):
             detail = (err or out).strip().splitlines()
@@ -269,6 +290,11 @@ class Operations:
                 ts = None
             self._step(op, level, msg.strip(), ts)
         return state, last_level
+
+
+def _with_flag(device: dict, flag: str) -> str:
+    """The shutdown command with a goodnight flag (--force / --cancel) appended."""
+    return f"{(device.get('shutdown_command') or '').strip()} {flag}"
 
 
 def _copy(op: dict) -> dict:

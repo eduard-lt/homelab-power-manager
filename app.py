@@ -178,7 +178,10 @@ def api_control():
         return jsonify({"success": False, "message": "SSH not configured for this device"}), 400
 
     if action == "turn_off":
-        op = ops.start_shutdown(device, client_ip)
+        # "Shut down anyway" only forces while goodnight's override window is open;
+        # after that it is a fresh check, so nobody gets cut off on stale info.
+        force = bool(data.get("force")) and ops.force_allowed(device_name)
+        op = ops.start_shutdown(device, client_ip, force=force)
         if op is None:
             return jsonify({"success": False, "message": "A shutdown is already running"}), 409
         _cancel_schedule(device_name, quiet=True)
@@ -203,7 +206,12 @@ def api_control():
         return jsonify({"success": cancelled})
 
     if action == "dismiss":
-        ops.dismiss(device_name)
+        op = ops.dismiss(device_name)
+        if op and op["state"] == "blocked" and time.time() < op.get("force_until", 0):
+            ops.cancel_override(device)
+            logging_utils.log_event(
+                "shutdown", "cancelled", f"Kept {device_name} on", device=device_name, ip=client_ip
+            )
         return jsonify({"success": True})
 
     return jsonify({"success": False, "message": f"Invalid action: {action}"}), 400

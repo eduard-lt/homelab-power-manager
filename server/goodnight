@@ -6,6 +6,7 @@
 #                           Busy  -> report who is active and exit 3. Running goodnight
 #                                    again within 10 minutes ignores the activity.
 #   goodnight --force       skip the activity check (same as the "double goodnight")
+#   goodnight --cancel      close the 10-minute override window ("keep it on")
 #   goodnight --check       only report activity (exit 0 = quiet, 3 = busy)
 #   goodnight --foreground  run the steps in this terminal and watch them (no check)
 #   goodnight --dry-run     check + show what it would do, change nothing
@@ -53,12 +54,13 @@ case "${1:-}" in
   "")           ;;
   --force)      force=true ;;
   --check)      mode=check ;;
+  --cancel)     mode=cancel ;;
   --foreground) mode=foreground ;;
   --dry-run)    mode=dry ;;
   --status)     mode=status ;;
   --progress)   mode=progress ;;
   --run)        mode=foreground; child=true; [ "${2:-}" = --kick-plex ] && kick_plex=true ;;  # internal
-  *) echo "usage: goodnight [--force|--check|--foreground|--dry-run|--status|--progress]" >&2; exit 2 ;;
+  *) echo "usage: goodnight [--force|--cancel|--check|--foreground|--dry-run|--status|--progress]" >&2; exit 2 ;;
 esac
 
 # say LEVEL MESSAGE - print, journal, and append to the progress file.
@@ -76,6 +78,17 @@ if [ "$mode" = status ]; then
   if is_running; then echo "goodnight: RUNNING"; else echo "goodnight: not running"; fi
   [ -f "$PROGRESS" ] && tail -n 8 "$PROGRESS" | while IFS=$'\t' read -r t lvl msg; do
     echo "  $(date -d "@$t" +%H:%M:%S) [$lvl] $msg"; done
+  exit 0
+fi
+
+if [ "$mode" = cancel ]; then
+  if [ -f "$BLOCKED" ]; then
+    rm -f "$BLOCKED"
+    echo "goodnight: override cancelled - the next goodnight checks for activity again"
+    logger -t goodnight "override window cancelled (keep it on)"
+  else
+    echo "goodnight: no override window open"
+  fi
   exit 0
 fi
 
